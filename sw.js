@@ -1,10 +1,10 @@
 // Service worker: makes the app installable and usable offline.
 // Network-first for app files, so updates show up on the next launch.
-const CACHE = 'pockettavern-v30';
+const CACHE = 'pockettavern-v31-narrative-db';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/db.js', './js/card.js', './js/prompt.js', './js/api.js',
-  './js/macros.js', './js/worldinfo.js', './js/regex.js', './js/preset.js', './js/render.js', './js/stscript.js', './js/enhance.js', './js/memory.js', './js/stimport.js', './js/extras.js', './js/instruct.js', './js/theme.js', './js/vault.js', './js/vendor/purify.js',
+  './js/narrative-db.js', './js/macros.js', './js/worldinfo.js', './js/regex.js', './js/preset.js', './js/render.js', './js/stscript.js', './js/enhance.js', './js/memory.js', './js/stimport.js', './js/extras.js', './js/instruct.js', './js/theme.js', './js/vault.js', './js/vendor/purify.js',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
 ];
 

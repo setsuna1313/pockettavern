@@ -13,10 +13,12 @@ import { formatMessage, renderInto, setThemeShadowCss, setExternalMedia } from '
 import { runScript, COMMANDS } from './stscript.js';
 import { DEFAULT_ENHANCE_SETTINGS, ENHANCE_TOGGLES, buildEnhancementPrompt, normalizeGeneratedText, DEFAULT_SUMMARIZE_SETTINGS } from './enhance.js';
 import * as MEM from './memory.js';
+import * as NDB from './narrative-db.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
 const VERSION = '1.9.10';
+const BUILD_NAME = 'PocketTavern';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -41,7 +43,7 @@ function defaultSettings() {
     ui: { enterSends: false, fontSize: 16, allowExternalMedia: false },
     instruct: { template: 'chatml', saved: [] },
     library: { sort: 'recent', favFirst: true, folders: [] },
-    ext: { enhance: { ...DEFAULT_ENHANCE_SETTINGS }, summarize: { ...DEFAULT_SUMMARIZE_SETTINGS }, memory: { ...MEM.DEFAULT_MEMORY_SETTINGS }, ...structuredClone(X.DEFAULT_EXT) },
+    ext: { enhance: { ...DEFAULT_ENHANCE_SETTINGS }, summarize: { ...DEFAULT_SUMMARIZE_SETTINGS }, memory: { ...MEM.DEFAULT_MEMORY_SETTINGS }, database: { ...NDB.DEFAULT_DATABASE_SETTINGS }, ...structuredClone(X.DEFAULT_EXT) },
     appearance: structuredClone(DEFAULT_APPEARANCE),
   };
 }
@@ -205,6 +207,7 @@ function promptFor(chat, char, history, opts = {}) {
     mode: opts.mode || 'normal', group, quietPrompt: opts.quietPrompt || '',
     summary: summaryFor(chat), timed: structuredClone(chat.wiTimed || {}),
     memory: memoryFor(chat), continuity: continuityFor(chat),
+    narrativeDatabase: history.length >= (chat.narrativeDb?.covered || 0) ? databaseFor(chat) : null,
     vision: S.settings.ext.vision,
     recall: opts.recall ? { text: opts.recall, depth: S.settings.ext.recall.depth, template: S.settings.ext.recall.template } : null,
   });
@@ -470,10 +473,17 @@ async function updateExpressionPanel() {
 }
 
 // ---------- long-term memory (Summaryception-style) ----------
+function databaseFor(chat) {
+  const cfg = S.settings.ext.database;
+  const state = chat.narrativeDb;
+  if (!cfg.enabled || !state || !state.text || NDB.isStale(chat.messages, state)) return null;
+  return { text: state.text, position: cfg.position, depth: cfg.depth, role: cfg.role, template: cfg.template, covered: state.covered, recentTokens: cfg.recentTokens };
+}
+
 function memoryFor(chat) {
   const cfg = S.settings.ext.memory;
   const text = MEM.assembleMemory(chat.mem);
-  if (!text) return null;
+  if (S.settings.ext.database.enabled || !S.settings.ext.memory.enabled || !text) return null;
   return { text, position: cfg.enabled ? cfg.position : 'macro', depth: cfg.depth, role: cfg.role, template: cfg.template };
 }
 
@@ -491,7 +501,7 @@ function liveContinuity(chat) {
 
 function continuityFor(chat) {
   const cfg = S.settings.ext.memory;
-  if (!cfg.enabled || !cfg.auditor || chat.groupId) return '';
+  if (!cfg.enabled || S.settings.ext.database.enabled || !cfg.auditor || chat.groupId) return '';
   const live = liveContinuity(chat);
   return live ? MEM.renderContinuity(live.state, live.stale) : '';
 }
@@ -613,6 +623,255 @@ async function runAuditor(chat, msg) {
     console.warn('Auditor failed', e);
     toast('Continuity auditor: ' + (e.message || e), 5000);
   }
+}
+
+// ---------- Narrative Database: independent cumulative summarization ----------
+function databaseDuration(seconds) {
+  const n = Math.max(0, Math.round(seconds));
+  if (n < 60) return n + 's';
+  if (n < 3600) return Math.floor(n / 60) + 'm ' + (n % 60) + 's';
+  return Math.floor(n / 3600) + 'h ' + Math.floor(n % 3600 / 60) + 'm';
+}
+function databaseEstimate(progress) {
+  if (!progress || !progress.timings?.length) return '';
+  const average = progress.timings.reduce((sum, n) => sum + n, 0) / progress.timings.length;
+  const left = Math.max(0, progress.total - progress.done);
+  return left ? ' · ~' + databaseDuration(average * left) + ' remaining (rough estimate)' : '';
+}
+
+function databaseProgressHtml(progress) {
+  const total = Math.max(1, progress.total);
+  const done = Math.min(total, Math.max(0, progress.done));
+  const percent = Math.round(done / total * 100);
+  const currentBatch = Math.min(done + 1, total);
+  return `
+    <div class="ndb-progress-head">
+      <span>📚 Narrative Database: ${esc(progress.message.toLowerCase())}…</span>
+      <span class="ndb-current-batch">Batch ${currentBatch} of ${total} · processing</span>
+    </div>
+    <div class="ndb-progress-track" role="progressbar" aria-label="Narrative Database batches completed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+      <div class="ndb-progress-fill" style="width:${percent}%"></div>
+    </div>
+    <div class="ndb-progress-foot">
+      <span>${done} / ${total} complete · ${percent}%</span>
+      <span>${progress.lastSeconds != null ? 'Last batch: ' + databaseDuration(progress.lastSeconds) : 'This might take a while…'}${databaseEstimate(progress)}</span>
+    </div>`;
+}
+function databaseFailureHtml(chat) {
+  if (!chat?.narrativeDbLastError) return '';
+  const covered = chat.narrativeDbPending?.covered || 0;
+  const batchLabel = chat.narrativeDbErrorBatch ? ' · Failed at batch ' + chat.narrativeDbErrorBatch : '';
+  return `<div class="ndb-error-title">⚠ Narrative Database stopped${batchLabel}</div>
+    <div class="ndb-error-message">${esc(chat.narrativeDbLastError)}</div>
+    <div class="ndb-error-meta">${covered ? covered + ' messages saved in a partial rebuild. Resume from that checkpoint.' : 'No partial rebuild checkpoint saved yet. Retry from the beginning.'}</div>
+    <div class="row wrap"><button class="btn sm" data-action="qa-database">Open database manager</button>
+      <button class="btn sm" data-action="ndb-dismiss-error">Dismiss error</button></div>`;
+}
+function updateDatabaseBanner() {
+  const progress = S.dbProgress && S.chat && S.dbProgress.chatId === S.chat.id ? S.dbProgress : null;
+  const errorHtml = !progress && S.chat ? databaseFailureHtml(S.chat) : '';
+  for (const id of ['ndb-running-banner', 'ndb-settings-progress', 'ndb-sheet-progress']) {
+    const el = $('#' + id);
+    if (!el) continue;
+    el.hidden = !progress && !errorHtml;
+    el.classList.toggle('ndb-error', !progress && !!errorHtml);
+    if (progress) el.innerHTML = databaseProgressHtml(progress);
+    else if (errorHtml) el.innerHTML = errorHtml;
+    else el.replaceChildren();
+  }
+}
+async function openDatabaseManager() {
+  // Settings can be opened before any chat has been loaded this session.
+  if (S.chat) return databaseSheet();
+  const chats = (await db.getAll('chats')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (!chats.length) return toast('Open a chat first to manage its Narrative Database.', 5000);
+  openSheet(`
+    <div class="sheet-title">Choose a chat to manage</div>
+    <p class="hint">Narrative Databases are saved per chat. Select one to open its manager.</p>
+    <div class="chat-list">
+      ${chats.map((c) => `<button class="btn block" data-action="ndb-select-chat" data-id="${esc(c.id)}">${esc(c.title || 'Untitled chat')}</button>`).join('')}
+    </div>
+  `, 'tall');
+}
+function databaseSheet() {
+  const chat = S.chat;
+  const cfg = S.settings.ext.database;
+  const dbState = chat.narrativeDb;
+  const stale = NDB.isStale(chat.messages, dbState);
+  const pending = NDB.pendingTokens(chat.messages, dbState?.covered || 0);
+  const prog = S.dbProgress && S.dbProgress.chatId === chat.id ? S.dbProgress : null;
+  const resumable = chat.narrativeDbPending && chat.narrativeDbPending.covered > 0 && !NDB.isStale(chat.messages, chat.narrativeDbPending);
+  const rebuildStart = resumable ? chat.narrativeDbPending.covered : 0;
+  const rebuildBatches = NDB.countBatches(chat.messages, rebuildStart, cfg.batchTokens);
+  openSheet(`
+    <div class="sheet-title" id="ndb-sheet">Narrative Database ${prog ? '<span class="muted small">· processing…</span>' : ''}</div>
+    <p class="hint">Independent of Summarize and Summaryception. Processes the original chat chronologically; the chat is never forked or deleted.</p>
+    <div class="mem-stats">
+      <div><b>${dbState?.covered || 0} / ${chat.messages.length}</b> messages covered</div>
+      <div><b>≈${Math.round(pending / 1000)}k</b> pending tokens</div>
+      <div><b>${(dbState?.checkpoints || []).length}</b> checkpoints</div>
+    </div>
+    <div id="ndb-sheet-progress" class="ndb-running-banner" hidden></div>
+    <div class="row wrap">
+      ${resumable ? `<button class="btn primary" data-action="ndb-resume" ${prog ? 'disabled' : ''}>▶ Resume partial rebuild</button>` : chat.narrativeDbLastError ? `<button class="btn primary" data-action="ndb-retry" ${prog ? 'disabled' : ''}>↻ Retry failed rebuild</button>` : ''}
+      <button class="btn primary" data-action="ndb-update" ${prog || stale ? 'disabled' : ''}>Update from Last Checkpoint</button>
+      <button class="btn" data-action="ndb-rebuild" ${prog ? 'disabled' : ''}>${resumable ? 'Restart rebuild from beginning' : 'Rebuild from Chat History'}</button>
+      ${prog ? '<button class="btn" data-action="ndb-cancel">Cancel after current batch</button>' : ''}
+      <button class="btn danger" data-action="ndb-clear" ${prog ? 'disabled' : ''}>Clear Database</button>
+    </div>
+    <p class="hint">Full rebuild: approximately ${rebuildBatches} sequential model calls at the current batch size (${Math.round(cfg.batchTokens).toLocaleString()} estimated tokens). ${rebuildStart ? 'Valid partial rebuild detected; estimate covers remaining messages. ' : ''}Timing estimate appears after the first successful batch; later batches may take longer as the database grows. API costs may apply.</p>
+    ${stale ? '<p class="hint" style="color:var(--danger,#e66)">⚠ Earlier messages were edited, deleted or reordered. Database is stale. Use Rebuild from Chat History.</p>' : ''}
+    ${prog ? `<p class="hint">${esc(prog.message)} (${prog.done}/${prog.total} batches).${prog.lastSeconds != null ? ` Last batch: ${databaseDuration(prog.lastSeconds)}.${databaseEstimate(prog)}` : ''} This might take a while… Progress is saved after each successful batch.</p>` : ''}
+    ${resumable ? `<p class="hint">Saved partial rebuild: ${chat.narrativeDbPending.covered} / ${chat.messages.length} messages processed. Resume continues from that checkpoint without repeating completed batches.</p>` : chat.narrativeDbPending ? '<p class="hint">A saved partial rebuild no longer matches this chat and cannot be resumed; start a fresh rebuild.</p>' : ''}
+    ${chat.narrativeDbLastError && !prog && !resumable ? `<p class="hint">The failed batch can be retried from the beginning without deleting your current active database.</p>` : ''}
+    <div class="row wrap">
+      <button class="btn" data-action="ndb-export">Export Database</button>
+      <button class="btn" data-action="ndb-import">Import Database</button>
+    </div>
+    <label class="field"><span class="label">Current database (editable)</span><textarea id="ndb-text" rows="19" spellcheck="false" placeholder="No database yet. Run Catch Up / Rebuild from Chat History.">${esc(dbState?.text || '')}</textarea></label>
+    <button class="btn" data-action="ndb-save" ${prog ? 'disabled' : ''}>Save Manual Corrections</button>
+    <p class="hint">Manual corrections become the input to the next update. Rebuild retains the active database until every batch succeeds.</p>
+  `, 'tall');
+  updateDatabaseBanner();
+}
+
+async function runDatabase(chat, { rebuild = false, flush = false, silent = false, restart = false } = {}) {
+  const cfg = S.settings.ext.database;
+  if (S.dbBusy || (!cfg.enabled && silent)) return;
+  if (!chat || !chat.messages.length) { if (!silent) toast('No chat messages to process.'); return; }
+  const old = chat.narrativeDb || null;
+  if (!rebuild && NDB.isStale(chat.messages, old)) {
+    if (!silent) toast('Database is stale. Rebuild from Chat History.', 5500);
+    return;
+  }
+  const start = rebuild ? 0 : (old?.covered || 0);
+  if (!NDB.nextBatch(chat.messages, start, cfg.batchTokens, flush || rebuild)) {
+    if (!silent) toast('Not enough new messages for the next update.');
+    return;
+  }
+  S.dbBusy = true;
+  S.dbCancel = false;
+  // Staging data is independent of active data: a failed rebuild never destroys it.
+  // A paused rebuild can resume without re-paying for all earlier successful batches.
+  const pendingRebuild = rebuild && !restart && chat.narrativeDbPending && chat.narrativeDbPending.covered > 0 && !NDB.isStale(chat.messages, chat.narrativeDbPending)
+    ? chat.narrativeDbPending : null;
+  if (rebuild && restart) { delete chat.narrativeDbPending; await saveChat(chat); }
+  const working = rebuild ? structuredClone(pendingRebuild || { text: '', covered: 0, checkpoints: [] }) : {
+    text: old?.text || '', covered: start, checkpoints: [...(old?.checkpoints || [])],
+  };
+  const estimatedTotal = Math.max(1, NDB.countBatches(chat.messages, working.covered, cfg.batchTokens));
+  S.dbProgress = { chatId: chat.id, done: 0, total: estimatedTotal, timings: [], message: rebuild ? 'Rebuilding' : 'Updating' };
+  updateDatabaseBanner();
+  if (!silent) { toast('Narrative Database: processing… This might take a while…', 5000); if ($('#ndb-sheet')) databaseSheet(); }
+  let succeeded = false;
+  try {
+    while (!S.dbCancel) {
+      const batch = NDB.nextBatch(chat.messages, working.covered, cfg.batchTokens, flush || rebuild);
+      if (!batch) { succeeded = true; break; }
+      // Per-call retention filter: the 0.14 default system prompt stays intact.
+      // Apply this to inherited memory too, so trivia does not accumulate.
+      const input = NDB.buildUpdateInput(working.text, batch, memNameOf) + `
+<retention_filter>
+Treat this database as LONG-TERM STORY MEMORY, not a transcript or scene inventory.
+Before returning the FULL database, audit BOTH the inherited text and new material:
+- KEEP lasting changes to relationships, characterization, trust, trauma, knowledge, secrets, consequential choices, timeline-specific history, world mechanics, open mysteries, promises, and real deadlines.
+- KEEP an ordinary action only for its lasting meaning. Example: Jason notices Catrin's malnourishment and carefully paces her food because of his own childhood experience. Do NOT preserve pastrami, sandwich placement, which bite was fed, foil, stove, or kitchen choreography.
+- KEEP a confession or change in intimacy; omit step-by-step kissing, sex, clothing, gestures, and other physical choreography unless a specific detail has an established lasting consequence.
+- KEEP a location, object, time, code, or precise number ONLY when it affects future decisions, access, a deadline, an unresolved plot, or a meaningful outcome. Remove expired logistics, minor inventory, ordinary meals, and decorative measurements.
+- ACTIVE THEATRE may briefly orient the immediate next scene; when the scene advances, retire its incidental details. The CHRONICLE must preserve outcomes, not every beat. DOSSIERS should describe what characters carry forward, not list props.
+- Do NOT erase or weaken the only record of a consequential fact to achieve brevity. Preserve separate timelines, unknown fates, who knows what, and task deadlines accurately.
+- Do NOT preserve trivia merely because it appears in the previous database. Consolidate duplicate important facts into their proper sections.
+- CHRONICLE SELECTION TEST: For every proposed historical entry ask, "Would losing this event change a future character decision, relationship, causal explanation, mystery, or timeline?" If not, delete it. A routine morning, shower, meal, bedroom movement, wake-up, or interruption does not earn a dated entry. Merge multiple beats of the same consequential conversation into one outcome-focused entry. Do not retain a numbered scene-by-scene account simply because earlier checkpoints did.
+- CHRONICLE DENSITY: Prefer a few compact, meaningful event clusters per arc rather than one entry per message or timestamp. Dates and exact times belong only where timing changes causality or a deadline. Preserve high-impact history even when old; do not impose an arbitrary entry limit or erase distinct timeline branches.
+- DOSSIER/WEB FILTER: Keep relationship status, changed trust, significant revelations, persistent health needs, and character-specific motives when established. Do not keep food brands, exact bites, calzone anecdotes, fabric names, bite marks, temporary outfits, incidental touch, decorative room descriptions, or exact tub/TV dimensions. A childhood experience can explain careful feeding without recording what food was involved.
+- GEOGRAPHY/ITEM FILTER: Keep access routes, security constraints, passcodes, operative devices and evidence when they matter. Remove apartment furnishings, decorative architecture, and inventories with no ongoing consequence. The availability of a private comfortable suite matters; its bathtub dimensions do not.
+- TIME AUDIT: Before assigning "overdue", "expired", "completed", or "missed", compare the task's stated deadline to the latest established scene date AND time, accounting for time zones. If the scene is ~noon Oct 14 and a transport is scheduled for 14:00 Oct 14, that transport is UPCOMING and unaddressed, NOT overdue. If timing is unclear, say "pending, time unverified" rather than inventing passage of time. Keep 18:00 transponder spoof, noon Oct 15 cover, and 14:00 transport distinct; never attach one deadline to another.
+- MYSTERY AUDIT: Include only explicitly raised or inherited genuinely unresolved questions. Do not manufacture ambiguities by treating two explicitly separate timeline branches as potentially the same. If a timeline distinction is established, retain it without inventing a reconciliation question.
+- FINAL SELF-CHECK: Re-read the entire output for scene-by-scene trivia, duplicate facts, timeline conflation, and premature deadline status. Cut the trivia and correct statuses before returning the FULL database; never replace the output with a patch.
+</retention_filter>`;
+      const system = evaluateMacros(cfg.prompt, { char: S.char?.name || '', user: activePersona().name || 'User', vars: {} });
+      const priorSignature = NDB.fingerprint(chat.messages, batch.end);
+      const batchStartedAt = Date.now();
+      let result;
+      try {
+        // Retry a malformed replacement once without advancing the checkpoint.
+        // Keep the saved 0.14 system prompt untouched; only annotate this call.
+        const validate = raw => NDB.checkedDatabase(raw);
+        try {
+          result = validate(await memCall(system, input, Math.max(1024, Number(cfg.maxOutputTokens) || 12000), cfg.model));
+        } catch (validationError) {
+          const repairInput = input + '\n\n<database_repair>\nThe previous replacement was rejected: ' + String(validationError.message || validationError).slice(0, 500) + '\nReturn a FULL standalone database with every required section. Replace shorthand such as "unchanged", "no change; see Chronicle", and "same as before" with concrete facts from the previous database. Do not omit prior facts merely because they were not mentioned in the new messages.\n</database_repair>';
+          result = validate(await memCall(system, repairInput, Math.max(1024, Number(cfg.maxOutputTokens) || 12000), cfg.model));
+        }
+        // Continuity heuristics are advisory: headings, deadlines and task
+        // wording may change legitimately. Request one repair, but never
+        // reject a structurally valid checkpoint solely on heuristic flags.
+        const continuity = NDB.continuityWarnings(working.text, result, batch.messages);
+        if (continuity.length) {
+          const retryInput = input + '\n\n<continuity_review>\nPlease verify these possible omissions against the original messages and previous database. Preserve the facts if still true; record completions, changes, and uncertainty accurately. Return the FULL corrected database, not a patch:\n- ' + continuity.join('\n- ') + '\n</continuity_review>';
+          try {
+            const repaired = validate(await memCall(system, retryInput, Math.max(1024, Number(cfg.maxOutputTokens) || 12000), cfg.model));
+            result = repaired;
+          } catch (reviewError) {
+            // First draft already passed structural validation. Keep it
+            // instead of blocking the rebuild on an optional review.
+            console.warn('Narrative Database continuity review failed; retaining structurally valid draft:', reviewError);
+          }
+          const remaining = NDB.continuityWarnings(working.text, result, batch.messages);
+          if (remaining.length) console.warn('Narrative Database possible continuity omissions (non-blocking):', remaining);
+        }
+      } catch (err) {
+        throw new Error(`Messages ${working.covered + 1}–${batch.end}: ${err.message || err}`);
+      }
+      const batchSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
+      // Do not mark a batch covered if its original messages changed during generation.
+      const signature = NDB.fingerprint(chat.messages, batch.end);
+      if (signature !== priorSignature || batch.messages.some(m => !chat.messages.includes(m))) throw new Error('Chat changed during processing; retry with Rebuild.');
+      working.text = result;
+      working.covered = batch.end;
+      working.signature = signature;
+      working.checkpoints.push({ covered: batch.end, at: Date.now(), text: result, signature });
+      // Bound backup growth; keep the most recent 20 versions for manual inspection/recovery.
+      if (working.checkpoints.length > 20) working.checkpoints.shift();
+      if (!rebuild) { chat.narrativeDb = structuredClone(working); await saveChat(chat); }
+      else { chat.narrativeDbPending = structuredClone(working); await saveChat(chat); }
+      S.dbProgress.done++;
+      S.dbProgress.lastSeconds = batchSeconds;
+      S.dbProgress.timings.push(batchSeconds);
+      console.info('Narrative Database batch', S.dbProgress.done, 'of', S.dbProgress.total, 'took', batchSeconds, 'seconds; output ~', NDB.estimateTokens(result), 'tokens');
+      updateDatabaseBanner();
+      if ($('#ndb-sheet')) databaseSheet();
+      if (!(flush || rebuild)) { succeeded = true; break; }
+      if (working.covered >= chat.messages.length) { succeeded = true; break; }
+    }
+    if (succeeded && !S.dbCancel) {
+      if (rebuild) { chat.narrativeDb = structuredClone(working); delete chat.narrativeDbPending; delete chat.narrativeDbLastError; delete chat.narrativeDbErrorBatch; await saveChat(chat); }
+      else if (chat.narrativeDbLastError) { delete chat.narrativeDbLastError; delete chat.narrativeDbErrorBatch; await saveChat(chat); }
+      if (!silent) toast('Narrative Database updated.');
+    } else if (S.dbCancel && !silent) toast('Catch-up paused. Resume from last checkpoint.');
+  } catch (e) {
+    console.error('Narrative Database error', e);
+    chat.narrativeDbLastError = String(e.message || e);
+    chat.narrativeDbErrorBatch = (S.dbProgress?.done || 0) + 1;
+    try { await saveChat(chat); } catch (saveError) { console.error('Could not save database error', saveError); }
+    toast('Narrative Database stopped: ' + (e.message || e) + ' (error saved in Narrative Database settings)', 8000);
+  } finally {
+    S.dbBusy = false; S.dbProgress = null; S.dbCancel = false;
+    updateDatabaseBanner();
+    if ($('#ndb-sheet')) databaseSheet();
+  }
+}
+
+function maybeDatabase(chat) {
+  const cfg = S.settings.ext.database;
+  if (!cfg.enabled || S.dbBusy) return;
+  const state = chat.narrativeDb;
+  if (NDB.isStale(chat.messages, state)) {
+    if (!S.dbStaleWarned) S.dbStaleWarned = new Set();
+    if (!S.dbStaleWarned.has(chat.id)) { S.dbStaleWarned.add(chat.id); toast('Narrative Database needs rebuilding after edits.', 6000); }
+    return;
+  }
+  if (NDB.pendingTokens(chat.messages, state?.covered || 0) >= cfg.batchTokens) runDatabase(chat, { silent: true });
 }
 
 function memorySheet() {
@@ -1158,7 +1417,7 @@ async function renderHome() {
   const showFolders = !tagOn && !q && !S.libFav && folders.length;
   app.innerHTML = `
     <header class="bar">
-      <h1 class="title">PocketTavern</h1>
+      <h1 class="title">${BUILD_NAME}</h1>
       <div class="spacer"></div>
       <button class="icon-btn" data-action="go" data-to="#/search" aria-label="Search chats">${ICONS.search}</button>
       <button class="icon-btn" data-action="import-files" aria-label="Import character">${ICONS.import}</button>
@@ -2083,6 +2342,7 @@ async function renderChatView(charId, chatId) {
       </button>
       <button class="icon-btn" data-action="chat-menu" aria-label="Chat menu">${ICONS.dots}</button>
     </header>
+    <div id="ndb-running-banner" class="ndb-running-banner" role="status" aria-live="polite" hidden></div>
     <div id="sheld">
       <div id="expr-panel" class="expr-panel" data-action="expr-toggle" hidden></div>
       <main class="scroll messages" id="chat"></main>
@@ -2097,6 +2357,7 @@ async function renderChatView(charId, chatId) {
         </div>
       </footer>
     </div>`;
+  updateDatabaseBanner();
   const input = $('#send_textarea');
   input.value = getDraft(S.chat);
   autosize(input);
@@ -2471,7 +2732,8 @@ async function runGeneration(mode, speakerId) {
     S.stopGroup = true;
   } else if (msg.swipes[idx] && msg.swipes[idx].trim()) {
     maybeSummarize(chat);
-    runAuditor(chat, msg).then(() => runMemory(chat, 'auto'));
+    if (S.settings.ext.database.enabled) maybeDatabase(chat);
+    else runAuditor(chat, msg).then(() => runMemory(chat, 'auto'));
     const ex = S.settings.ext;
     if (ex.expressions.enabled && ex.expressions.auto) classifyExpression(chat, msg);
     const afterTranslate = ex.translate.enabled && ex.translate.auto ? translateMessage(msg, chat) : Promise.resolve();
@@ -2609,6 +2871,7 @@ function quickActions() {
       ${S.enhanceOriginal && S.enhanceOriginal.chatId === S.chat.id ? `<button data-action="restore-draft">${ICONS.back}<span>Restore draft</span></button>` : ''}
       <button data-action="qa-summary">${ICONS.note}<span>Summary${S.chat.summary && S.chat.summary.text ? ' •' : ''}</span></button>
       ${S.settings.ext.memory.enabled || S.chat.mem ? `<button data-action="qa-memory">${ICONS.layers}<span>Memory</span></button>` : ''}
+      ${S.settings.ext.database.enabled || S.chat.narrativeDb ? `<button data-action="qa-database">${ICONS.note}<span>Narrative Database</span></button>` : ''}
       <button data-action="view-prompt">${ICONS.eye}<span>View prompt</span></button>
       ${activePreset() ? `<button data-action="go" data-to="#/preset/${activePreset().id}">${ICONS.sliders}<span>Prompt toggles</span></button>` : ''}
     </div>
@@ -2653,9 +2916,38 @@ function viewPrompt() {
   `, 'tall');
 }
 
-function exportChat() {
+// Portable content fingerprint. Message IDs are regenerated on JSONL import, so
+// Narrative Database checkpoints cannot use their old ID-based signatures.
+function portableChatFingerprint(messages) {
+  let hash = 2166136261;
+  const mix = value => {
+    for (const char of String(value)) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+  };
+  for (const m of messages) {
+    mix(m.role); mix('|'); mix(m.hidden ? '1' : '0'); mix('|');
+    // SillyTavern JSONL exports user turns as one selected message, not swipes.
+    const selected = (m.swipes || [])[m.swipeIdx || 0] ?? '';
+    mix(JSON.stringify(m.role === 'user' ? [selected] : (m.swipes || [])));
+    mix('|'); mix(m.role === 'user' ? 0 : (m.swipeIdx || 0)); mix('\n');
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function exportChat(includeMemory = false) {
   const persona = activePersona();
-  const lines = [JSON.stringify({ user_name: persona.name, character_name: S.char.name, create_date: new Date(S.chat.createdAt).toISOString(), chat_metadata: {} })];
+  const metadata = {};
+  if (includeMemory) {
+    const chat = S.chat;
+    metadata.pockettavern_memory = {
+      version: 1,
+      messageCount: chat.messages.length,
+      messageFingerprint: portableChatFingerprint(chat.messages),
+      ...(chat.narrativeDb?.text ? { narrativeDb: structuredClone(chat.narrativeDb) } : {}),
+      ...(chat.summary?.text ? { summary: structuredClone(chat.summary) } : {}),
+      ...(chat.authorsNote?.text ? { authorsNote: structuredClone(chat.authorsNote) } : {}),
+    };
+  }
+  const lines = [JSON.stringify({ user_name: persona.name, character_name: S.char.name, create_date: new Date(S.chat.createdAt).toISOString(), chat_metadata: metadata })];
   for (const m of S.chat.messages) {
     const isUser = m.role === 'user';
     lines.push(JSON.stringify({
@@ -2668,19 +2960,69 @@ function exportChat() {
       ...(isUser ? {} : { swipes: m.swipes, swipe_id: m.swipeIdx }),
     }));
   }
-  saveFile(new Blob([lines.join('\n')], { type: 'application/jsonl' }), `${safeName(S.char.name)} - ${safeName(S.chat.title)}.jsonl`);
+  const suffix = includeMemory ? ' - with memory' : '';
+  saveFile(new Blob([lines.join('\n')], { type: 'application/jsonl' }), `${safeName(S.char.name)} - ${safeName(S.chat.title)}${suffix}.jsonl`);
+}
+
+function exportChatChoice() {
+  if (!S.chat?.narrativeDb?.text) return exportChat();
+  openSheet(`
+    <div class="sheet-title">Export Chat</div>
+    <p class="hint">Choose a standard SillyTavern-compatible chat file, or include the saved Narrative Database and running summary for restoration in PocketTavern.</p>
+    <div class="row wrap">
+      <button class="btn" data-action="export-chat-standard">Export Chat</button>
+      <button class="btn primary" data-action="export-chat-memory">Export with Summary Data</button>
+    </div>
+    <p class="hint">Both files use JSONL. Other apps may ignore the extra PocketTavern metadata.</p>
+  `);
+}
+
+function restoreExportedChatMemory(chat, md) {
+  const bundle = md?.pockettavern_memory;
+  if (!bundle || bundle.version !== 1) return false;
+  // Only restore checkpoints if the exported message contents and order survived.
+  if (bundle.messageCount !== chat.messages.length ||
+      bundle.messageFingerprint !== portableChatFingerprint(chat.messages)) return false;
+  const src = bundle.narrativeDb;
+  if (src && typeof src.text === 'string' && src.text.trim()) {
+    const covered = Number(src.covered);
+    if (Number.isInteger(covered) && covered >= 0 && covered <= chat.messages.length) {
+      const checkpoints = Array.isArray(src.checkpoints) ? src.checkpoints
+        .filter(c => c && typeof c.text === 'string' && Number.isInteger(c.covered) && c.covered >= 0 && c.covered <= covered)
+        .slice(-20).map(c => ({...c, signature: NDB.fingerprint(chat.messages, c.covered)})) : [];
+      chat.narrativeDb = {
+        text: src.text, covered, checkpoints,
+        signature: NDB.fingerprint(chat.messages, covered),
+        at: Number(src.at) || Date.now(),
+      };
+    }
+  }
+  const summary = bundle.summary;
+  if (summary && typeof summary.text === 'string' && summary.text.trim()) {
+    chat.summary = {text: summary.text, upTo: Number.isInteger(summary.upTo)
+      ? Math.max(0, Math.min(summary.upTo, chat.messages.length)) : chat.messages.length, at: Number(summary.at) || Date.now()};
+  }
+  if (bundle.authorsNote && typeof bundle.authorsNote.text === 'string') {
+    chat.authorsNote = {
+      text: bundle.authorsNote.text,
+      depth: Number(bundle.authorsNote.depth) || 4,
+      role: ['system','assistant','user'].includes(bundle.authorsNote.role) ? bundle.authorsNote.role : 'system',
+    };
+  }
+  return !!(chat.narrativeDb || chat.summary);
 }
 
 async function importChat() {
   const [file] = await pickFile('file-chat');
   if (!file) return;
   try {
-    const { messages: msgs } = parseStChat(await file.text(), { uid: db.uid });
+    const { messages: msgs, meta } = parseStChat(await file.text(), { uid: db.uid });
     if (!msgs.length) throw new Error('No messages found in that file');
     const now = Date.now();
     const chat = { id: db.uid(), charId: S.char.id, title: file.name.replace(/\.jsonl?$/i, '').slice(0, 60), createdAt: now, updatedAt: now, messages: msgs };
+    const restored = restoreExportedChatMemory(chat, meta?.chat_metadata);
     await saveChat(chat);
-    toast(`Imported ${msgs.length} messages`);
+    toast(`Imported ${msgs.length} messages${restored ? ' with summary data' : ''}`);
     go(`#/chat/${S.char.id}/${chat.id}`);
   } catch (e) {
     toast('Import failed: ' + e.message, 5000);
@@ -3123,6 +3465,7 @@ function renderSettingsView(open) {
     </div>
     <p class="hint">Imports SillyTavern UI themes and Moonlit Echoes presets (e.g. “[Moonlit] Glimmer”). Exports load in SillyTavern too. Chat styles also switch with /echostyle, /whisperstyle… or /chatstyle name.</p>`;
   const sm = S.settings.ext.summarize;
+  const nd = S.settings.ext.database;
   const tog = (attr, key, on, label, hint = '') => `<label class="toggle"><span><span class="label">${label}</span>${hint ? `<span class="hint">${hint}</span>` : ''}</span><input type="checkbox" ${attr}="${key}" ${on ? 'checked' : ''}><i></i></label>`;
   const extBody = `
     <h4 class="sub">✨ Enhance My Reply</h4>
@@ -3143,6 +3486,25 @@ function renderSettingsView(open) {
     <label class="field"><span class="label">Summary prompt</span><textarea data-ext-sum="prompt" rows="5">${esc(sm.prompt)}</textarea></label>
     <p class="hint">Edit or refresh a chat's summary from ✨ → Summary. Your preset can use it anywhere with {{summary}}.</p>
     ${extSections()}
+    <h4 class="sub">📚 Narrative Database <span class="muted small">(cumulative continuity)</span></h4>
+    ${tog('data-ext-ndb-toggle', 'enabled', nd.enabled, 'Enabled', 'Third memory mode: structured rolling database, independently stored from Summaryception and Summarize')}
+    <label class="field inline"><span class="label">Update every (new RP tokens)<span class="hint">Default 8,000. The banner at the top of chat stays visible while an update runs.</span></span><input inputmode="numeric" data-ext-ndb="batchTokens" value="${nd.batchTokens}"></label>
+    <label class="field inline"><span class="label">Keep verbatim (recent RP tokens)</span><input inputmode="numeric" data-ext-ndb="recentTokens" value="${nd.recentTokens}"></label>
+    <label class="field inline"><span class="label">Max database output tokens</span><input inputmode="numeric" data-ext-ndb="maxOutputTokens" value="${nd.maxOutputTokens}"></label>
+    <label class="field"><span class="label">Summarizer model (optional, blank = current model)</span><input data-ext-ndb="model" value="${esc(nd.model)}" autocapitalize="off"></label>
+    <label class="field inline"><span class="label">Insert database</span><select data-ext-ndb-select="position">
+      ${[['before','Before the main prompt'],['prompt','After the main prompt'],['chat','In chat @ depth']].map(([k,v])=>`<option value="${k}" ${nd.position===k?'selected':''}>${v}</option>`).join('')}
+    </select></label>
+    ${nd.position === 'chat' ? `<label class="field inline"><span class="label">Depth</span><input inputmode="numeric" data-ext-ndb="depth" value="${nd.depth}"></label>` : ''}
+    <details class="section"><summary>Database update prompt and injection template</summary><div class="sec-body">
+      <label class="field"><span class="label">Complete database update prompt</span><textarea rows="12" data-ext-ndb="prompt">${esc(nd.prompt)}</textarea></label>
+      <label class="field"><span class="label">Injection template (use {{database}})</span><textarea rows="3" data-ext-ndb="template">${esc(nd.template)}</textarea></label>
+      <button class="btn ndb-reset-prompt-btn" data-action="ndb-reset-prompt">Restore default update prompt (0.22.7 · same 0.14 prompt)</button>
+      <p class="hint">Version 0.22.7 preserves the original 0.14 update prompt. Validation rejects incomplete-memory placeholders, automatically retries a malformed response once, checks protected continuity, and retains the last good checkpoint on failure. The Recent Log may be empty. Saved custom prompts are unchanged.</p>
+    </div></details>
+    <div id="ndb-settings-progress" class="ndb-running-banner" hidden></div>
+    <button class="btn ndb-manage-btn" data-action="qa-database">Manage Narrative Database / Rebuild from Chat History</button>
+    <p class="hint">Choose only one memory mode at a time. Switching modes retains each mode's stored data. Narrative Database does not modify the original messages.</p>
     <h4 class="sub">🧠 Layered memory <span class="muted small">(Summaryception)</span></h4>
     ${tog('data-ext-mem-toggle', 'enabled', mm.enabled, 'Enabled', 'Recent chat stays word-for-word; older chat becomes layered memories and is “ghosted” (still visible to you, not sent)')}
     <label class="field inline"><span class="label">Memory mode</span><select data-ext-mem-select="mode">
@@ -3219,10 +3581,11 @@ function renderSettingsView(open) {
       ${sec('appearance', 'Appearance', apBody)}
       ${sec('ui', 'Interface', uiBody)}
       ${sec('data', 'Data & backup', dataBody)}
-      <p class="muted small center">PocketTavern ${VERSION}</p>
+      <p class="muted small center">${BUILD_NAME} — ${VERSION}</p>
       <div class="bottom-space"></div>
     </main>`;
 
+  updateDatabaseBanner();
   if (navigator.storage && navigator.storage.estimate) {
     navigator.storage.estimate().then(async (est) => {
       const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false;
@@ -4021,6 +4384,68 @@ const actions = {
   'restore-draft': () => { closeSheet(); restoreDraft(); },
   'qa-summary': summarySheet,
   'qa-memory': memorySheet,
+  'qa-database': openDatabaseManager,
+  'ndb-select-chat': async (el) => {
+    const chat = await db.get('chats', el.dataset.id);
+    if (!chat) return toast('That chat could not be found.', 5000);
+    S.chat = chat;
+    databaseSheet();
+  },
+  'ndb-update': () => runDatabase(S.chat, { flush: true }),
+  'ndb-dismiss-error': async () => {
+    if (!S.chat) return;
+    delete S.chat.narrativeDbLastError;
+    delete S.chat.narrativeDbErrorBatch;
+    await saveChat(S.chat);
+    updateDatabaseBanner();
+    if ($('#ndb-sheet')) databaseSheet();
+  },
+  'ndb-retry': () => runDatabase(S.chat, { rebuild: true, flush: true, restart: true }),
+  'ndb-resume': () => {
+    const chat = S.chat;
+    const partial = chat.narrativeDbPending;
+    if (!partial?.covered || NDB.isStale(chat.messages, partial)) return toast('No valid partial rebuild is available to resume.');
+    runDatabase(chat, { rebuild: true, flush: true });
+  },
+  'ndb-rebuild': () => {
+    const chat = S.chat;
+    const partial = chat.narrativeDbPending;
+    const batches = NDB.countBatches(chat.messages, 0, S.settings.ext.database.batchTokens);
+    const warning = partial?.covered ? ' This discards the saved partial rebuild and starts over.' : '';
+    if (confirm('Rebuild Narrative Database from the beginning? Estimated: ' + batches + ' sequential model requests for ' + chat.messages.length + ' messages. Large histories can take a long time and may incur API charges.' + warning + ' The current active database remains unchanged until the rebuild succeeds. Continue?')) runDatabase(chat, { rebuild: true, flush: true, restart: true });
+  },
+  'ndb-cancel': () => { S.dbCancel = true; toast('Cancel requested — stopping after current API call.'); },
+  'ndb-clear': async () => {
+    if (!confirm('Clear Narrative Database for this chat? Chat messages and other memory systems remain untouched.')) return;
+    delete S.chat.narrativeDb; delete S.chat.narrativeDbPending; delete S.chat.narrativeDbLastError; delete S.chat.narrativeDbErrorBatch; delete S.chat.narrativeDbErrorBatch;
+    await saveChat(S.chat); databaseSheet();
+  },
+  'ndb-save': async () => {
+    const text = $('#ndb-text')?.value?.trim();
+    if (!text) return toast('Database is empty. Use Clear Database instead.');
+    const state = S.chat.narrativeDb || { covered: 0, checkpoints: [] };
+    S.chat.narrativeDb = { ...state, text, signature: NDB.fingerprint(S.chat.messages, state.covered || 0), at: Date.now() };
+    await saveChat(S.chat); toast('Manual corrections saved.'); databaseSheet();
+  },
+  'ndb-export': () => {
+    const state = S.chat.narrativeDb;
+    if (!state?.text) return toast('No database to export.');
+    saveFile(new Blob([JSON.stringify({ format: 'pockettavern-narrative-db-v1', database: state }, null, 2)], {type:'application/json'}), 'narrative-database.json');
+  },
+  'ndb-import': async () => {
+    const files = await pickFile('file-ndb');
+    if (!files.length) return;
+    try {
+      const data = JSON.parse(await files[0].text());
+      const state = data.database;
+      if (data.format !== 'pockettavern-narrative-db-v1' || !state?.text) throw new Error('Invalid Narrative Database export.');
+      // Imported coverage is not automatically trusted for a different chat.
+      S.chat.narrativeDb = { text: state.text, covered: 0, checkpoints: [], signature: NDB.fingerprint(S.chat.messages, 0) };
+      delete S.chat.narrativeDbPending; delete S.chat.narrativeDbLastError;
+      await saveChat(S.chat); databaseSheet(); toast('Imported text; coverage reset. Rebuild for this chat if needed.');
+    } catch (e) { toast(e.message || 'Import failed.', 6000); }
+  },
+  'ndb-reset-prompt': () => { S.settings.ext.database.prompt = NDB.DEFAULT_DATABASE_PROMPT; saveSettings(); rerenderSettings(); },
   'mem-force': () => { runMemory(S.chat, 'force'); memorySheet(); },
   'mem-slop': () => { runMemory(S.chat, 'slop'); memorySheet(); },
   'mem-clear': () => { if (confirm('Clear long-term memory for this chat? Ghosted messages are sent to the AI again. No messages are deleted.')) { clearMemory(S.chat); memorySheet(); } },
@@ -4220,7 +4645,9 @@ const actions = {
     if (el.dataset.id === S.chat.id) { closeSheet(); go(`#/chat/${S.char.id}/${S.chats[0] ? S.chats[0].id : ''}`); render(); } else chatMenu();
   },
   'view-prompt': viewPrompt,
-  'export-chat': exportChat,
+  'export-chat': exportChatChoice,
+  'export-chat-standard': () => { closeSheet(); exportChat(false); },
+  'export-chat-memory': () => { closeSheet(); exportChat(true); },
   'import-chat': importChat,
 
   'edit-back': () => {
@@ -4522,6 +4949,10 @@ document.addEventListener('input', (e) => {
     const numeric = ['maxImages', 'rate', 'topK', 'skipRecent', 'depth', 'minScore'].includes(k);
     S.settings.ext[g][k] = numeric ? (numOrNull(el.value) ?? S.settings.ext[g][k]) : el.value;
     saveSettings();
+  } else if (el.dataset.extNdb) {
+    const k = el.dataset.extNdb;
+    S.settings.ext.database[k] = ['batchTokens','recentTokens','maxOutputTokens','depth'].includes(k) ? (numOrNull(el.value) ?? S.settings.ext.database[k]) : el.value;
+    saveSettings();
   } else if (el.dataset.extMem) {
     const k = el.dataset.extMem;
     const numeric = ['verbatim', 'queued', 'memoryBudget', 'depth'].includes(k);
@@ -4614,8 +5045,18 @@ document.addEventListener('change', (e) => {
     rerenderSettings();
     return;
   }
+  if (el.dataset.extNdbToggle || el.dataset.extNdbSelect) {
+    const key = el.dataset.extNdbToggle || el.dataset.extNdbSelect;
+    S.settings.ext.database[key] = el.dataset.extNdbToggle ? el.checked : el.value;
+    if (key === 'enabled' && el.checked) {
+      S.settings.ext.summarize.enabled = false;
+      S.settings.ext.memory.enabled = false;
+    }
+    saveSettings(); rerenderSettings(); return;
+  }
   if (el.dataset.extMemToggle) {
     S.settings.ext.memory[el.dataset.extMemToggle] = el.checked;
+    if (el.dataset.extMemToggle === 'enabled' && el.checked) S.settings.ext.database.enabled = false;
     saveSettings();
     rerenderSettings();
     return;
@@ -4643,6 +5084,7 @@ document.addEventListener('change', (e) => {
   }
   if (el.dataset.extSumToggle) {
     S.settings.ext.summarize[el.dataset.extSumToggle] = el.checked;
+    if (el.dataset.extSumToggle === 'enabled' && el.checked) S.settings.ext.database.enabled = false;
     saveSettings();
     return;
   }
@@ -4811,6 +5253,7 @@ async function boot() {
       enhance: { ...def.ext.enhance, ...((settings.ext || {}).enhance || {}) },
       summarize: { ...def.ext.summarize, ...((settings.ext || {}).summarize || {}) },
       memory: { ...def.ext.memory, ...((settings.ext || {}).memory || {}) },
+      database: { ...def.ext.database, ...((settings.ext || {}).database || {}) },
       ...Object.fromEntries(Object.keys(X.DEFAULT_EXT).map((k) => [k, { ...def.ext[k], ...((settings.ext || {})[k] || {}) }])),
     },
     appearance: { ...def.appearance, ...(settings.appearance || {}) },

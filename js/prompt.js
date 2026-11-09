@@ -60,10 +60,24 @@ function formatExamples(raw, heading) {
  * group: { names: 'A, B', nameOf(msg) } for group chats (names are prefixed to history, nudge added)
  * Returns { messages, stats, vars }
  */
-export function buildPrompt({ char, persona, settings, chat, history, preset, lorebooks, regexScripts, model, embeddedEntries, mode = 'normal', group = null, quietPrompt = '', summary = null, timed = null, memory = null, continuity = '', vision = null, recall = null }) {
+export function buildPrompt({ char, persona, settings, chat, history, preset, lorebooks, regexScripts, model, embeddedEntries, mode = 'normal', group = null, quietPrompt = '', summary = null, timed = null, memory = null, narrativeDatabase = null, continuity = '', vision = null, recall = null }) {
   // Ghosted messages are covered by long-term memory and not sent (they stay visible in the chat).
   const fullLength = history.length; // timed lorebook effects count every message
-  history = history.filter((m) => !m.ghost && !m.hidden);
+  // DB-covered messages stay in the original chat, but leave the generation prompt.
+  // Summaryception's ghost flags are ignored when that memory system isn't enabled.
+  if (narrativeDatabase?.text) {
+    // Keep up to N verbatim tokens for character voice and immediate scene details,
+    // even when the same events are already represented in the cumulative record.
+    const budget = Math.max(0, Number(narrativeDatabase.recentTokens) || 0);
+    let recentStart = history.length, used = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const cost = estTokens(msgText(history[i])) + 4;
+      if (used + cost > budget && recentStart < history.length) break;
+      used += cost; recentStart = i;
+    }
+    history = history.slice(Math.min(narrativeDatabase.covered || 0, recentStart));
+  }
+  history = history.filter((m) => !(settings.ext.memory.enabled && m.ghost) && !m.hidden);
   const P = settings.prompt;
   const samplers = settings.preset;
   const pr = preset || simplePreset(P);
@@ -185,6 +199,13 @@ export function buildPrompt({ char, persona, settings, chat, history, preset, lo
     if (memory.position === 'chat') injections.push({ depth: Number(memory.depth) || 0, order: 40, role: memory.role || 'system', content });
     else if (memory.position === 'prompt') blocks.splice(mainAt + 1, 0, { role: memory.role || 'system', content });
     else blocks.unshift({ role: memory.role || 'system', content });
+  }
+  if (narrativeDatabase?.text) {
+    const d = narrativeDatabase;
+    const content = macro((d.template || '{{database}}').replace(/\{\{database\}\}/gi, d.text));
+    if (d.position === 'chat') injections.push({ depth: Number(d.depth) || 0, order: 35, role: d.role || 'system', content });
+    else if (d.position === 'prompt') blocks.splice(mainAt + 1, 0, { role: d.role || 'system', content });
+    else blocks.unshift({ role: d.role || 'system', content });
   }
   if (continuity && continuity.trim()) injections.push({ depth: 0, order: 30, role: 'system', content: macro(continuity) });
 
