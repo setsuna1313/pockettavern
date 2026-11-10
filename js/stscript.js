@@ -99,6 +99,7 @@ const ALIASES = {
 };
 
 export const COMMANDS = [
+  '/newchat', '/help',
   '/send text', '/sendas name=Char text', '/sys text', '/trigger [name]', '/gen prompt', '/genraw prompt',
   '/impersonate', '/continue', '/regenerate', '/setinput text', '/input prompt', '/popup text', '/echo text',
   '/buttons labels=["A","B"] text', '/qr label', '/messages [names=off] 0-3 | last', '/del N', '/addswipe text',
@@ -325,7 +326,7 @@ async function exec(src, api, scope, pipeIn) {
       case 'persona': api.persona(argStr); break;
       default:
         if (api.custom && api.custom[name]) { const r = await api.custom[name](argStr, named); if (r !== undefined) pipe = String(r); break; }
-        throw new Error(`/${cmd.name} isn't supported in PocketTavern yet.`);
+        throw new Error(`/${cmd.name} isn't supported in PocketTavern yet. To get it added, export the quick reply set (Settings → Quick replies → Export) and send it to whoever maintains your PocketTavern.`);
     }
   }
   return pipe;

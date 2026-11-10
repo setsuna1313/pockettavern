@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.0';
+const VERSION = '1.10.1';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -877,6 +877,17 @@ function scriptApi(chat) {
       },
       'sc-preview': () => { if (S.chat === chat) memorySheet(); return MEM.assembleMemory(chat.mem); },
       'sc-clear': () => { clearMemory(chat); toast('Memory cleared for this chat'); },
+      newchat: async () => {
+        if (S.chat !== chat) return;
+        const c = await createChat(S.char);
+        await saveChat(c);
+        go(`#/chat/${S.char.id}/${c.id}`);
+      },
+      help: () => {
+        openSheet(`<div class="sheet-title">Slash commands</div>
+          <p class="hint">The STscript commands PocketTavern understands. Quick replies and the message box can use them.</p>
+          <pre class="ge-detail">${esc(COMMANDS.join('\n'))}</pre>`, 'tall');
+      },
       chatstyle: (arg) => {
         const v = String(arg || '').trim().toLowerCase().replace(/style$/, '');
         if (!CHAT_STYLES[v]) throw new Error(`Chat styles: ${Object.keys(CHAT_STYLES).join(', ')}`);
