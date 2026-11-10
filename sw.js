@@ -1,6 +1,6 @@
 // Service worker: makes the app installable and usable offline.
 // Network-first for app files, so updates show up on the next launch.
-const CACHE = 'pockettavern-v32';
+const CACHE = 'pockettavern-v33';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/db.js', './js/card.js', './js/prompt.js', './js/api.js',

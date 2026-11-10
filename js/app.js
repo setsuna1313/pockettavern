@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.1';
+const VERSION = '1.10.2';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -300,7 +300,7 @@ function imageSheet() {
     <div class="menu-grid two">
       ${['scene', 'char', 'user'].map((m) => `<button data-action="img-gen" data-mode="${m}">${ICONS.image}<span>${esc(X.IMAGE_MODES[m].replace('{{char}}', names.char || 'character').replace('{{user}}', names.user || 'you'))}</span></button>`).join('')}
     </div>
-    <label class="field"><span class="label">Or describe it</span><textarea id="img-free" rows="3" placeholder="e.g. Wade's bike parked outside the bar at night, neon rain"></textarea></label>
+    <label class="field"><span class="label">Or describe it</span><textarea autocomplete="off" id="img-free" rows="3" placeholder="e.g. Wade's bike parked outside the bar at night, neon rain"></textarea></label>
     <button class="btn primary block" data-action="img-gen" data-mode="free">${cfg.writePrompt ? 'Generate (the AI polishes your description)' : 'Generate'}</button>`);
 }
 
@@ -756,7 +756,7 @@ function summarySheet() {
   openSheet(`
     <div class="sheet-title">Summary</div>
     <p class="hint">${cfg.enabled ? `Updates automatically every ${cfg.every} messages${sm && sm.upTo ? ` (last at message ${sm.upTo})` : ''}.` : 'Summarize is off in Settings → Extensions, so this summary only reaches the AI through a {{summary}} macro in your preset.'}</p>
-    <label class="field"><textarea id="summary-text" rows="9" placeholder="No summary yet.">${esc(sm ? sm.text : '')}</textarea></label>
+    <label class="field"><textarea autocomplete="off" id="summary-text" rows="9" placeholder="No summary yet.">${esc(sm ? sm.text : '')}</textarea></label>
     <div class="row wrap">
       <button class="btn" data-action="summary-now">Summarize now</button>
       <button class="btn primary" data-action="summary-save">Save</button>
@@ -2069,7 +2069,7 @@ async function renderGroupEditor(id) {
         <option value="swap" ${g.mode !== 'join' ? 'selected' : ''}>Swap: only the speaker's card is sent</option>
         <option value="join" ${g.mode === 'join' ? 'selected' : ''}>Join: every member's card is sent</option>
       </select></label>
-      <label class="field"><span class="label">Group scenario <span class="hint">(optional, overrides cards' scenarios)</span></span><textarea id="g-scenario" rows="3">${esc(g.scenario || '')}</textarea></label>
+      <label class="field"><span class="label">Group scenario <span class="hint">(optional, overrides cards' scenarios)</span></span><textarea autocomplete="off" id="g-scenario" rows="3">${esc(g.scenario || '')}</textarea></label>
       ${g.isNew ? '' : `<button class="btn danger block" data-action="group-delete">${ICONS.trash} Delete group</button>`}
       <div class="bottom-space"></div>
     </main>`;
@@ -2213,7 +2213,7 @@ async function renderChatView(charId, chatId) {
       ${qrBarHtml()}
       <footer class="composer" id="send_form">
         <div id="leftSendForm"><button class="qa-btn" id="options_button" data-action="quick-actions" aria-label="More actions">${ICONS.wand}</button>${S.settings.ext.vision.enabled ? `<button class="qa-btn" id="attach_button" data-action="attach" aria-label="Attach an image">${ICONS.image}</button>` : ''}</div>
-        <textarea id="send_textarea" rows="1" placeholder="Message ${esc(char.name)}" enterkeyhint="${S.settings.ui.enterSends ? 'send' : 'enter'}"></textarea>
+        <textarea autocomplete="off" id="send_textarea" rows="1" placeholder="Message ${esc(char.name)}" enterkeyhint="${S.settings.ui.enterSends ? 'send' : 'enter'}"></textarea>
         <div id="rightSendForm">
           <button class="enh-btn" id="enh-btn" data-action="enhance" aria-label="Enhance reply" title="Enhance reply" hidden>✨</button>
           <button class="send-btn" id="send_but" data-action="send" aria-label="Send">${ICONS.send}</button>
@@ -2274,7 +2274,7 @@ function msgHtml(msg, isLast) {
   const imagesHtml = imgs.length ? `<div class="mes-images">${imgs.map((src, i) => `<img class="mes-img" src="${esc(src)}" alt="" data-action="view-image" data-id="${msg.id}" data-i="${i}">`).join('')}</div>` : '';
   let body;
   if (editing) {
-    body = `<textarea class="edit-box" id="edit-box">${esc(raw)}</textarea>
+    body = `<textarea autocomplete="off" class="edit-box" id="edit-box">${esc(raw)}</textarea>
       <div class="row end"><button class="btn sm" data-action="edit-cancel">Cancel</button><button class="btn sm primary" data-action="edit-save" data-id="${msg.id}">Save</button></div>`;
   } else {
     const who = `is_user="${isUser}"`;
@@ -2759,7 +2759,7 @@ function authorsNoteSheet() {
   openSheet(`
     <div class="sheet-title">Author's Note</div>
     <p class="hint">Saved with this chat and inserted into the prompt every turn, ${'at'} the depth you choose (0 = after the last message). Macros work.</p>
-    <label class="field"><textarea id="an-text" rows="6" placeholder="e.g. [Style: slow burn. {{char}} is hiding a secret.]">${esc(n.text)}</textarea></label>
+    <label class="field"><textarea autocomplete="off" id="an-text" rows="6" placeholder="e.g. [Style: slow burn. {{char}} is hiding a secret.]">${esc(n.text)}</textarea></label>
     <div class="row wrap">
       <label class="field" style="width:110px"><span class="label">Depth</span><input id="an-depth" inputmode="numeric" value="${n.depth ?? 4}"></label>
       <label class="field grow"><span class="label">Role</span><select id="an-role">${['system', 'user', 'assistant'].map((r) => `<option ${n.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
@@ -2867,20 +2867,20 @@ async function renderEditView(id) {
           <span class="label">${label}</span>
           ${hint === 'input'
             ? `<input data-draft="${k}" value="${esc(d[k])}" autocomplete="off">`
-            : `<textarea data-draft="${k}" rows="${k === 'description' || k === 'first_mes' ? 6 : 3}">${esc(d[k])}</textarea>`}
+            : `<textarea autocomplete="off" data-draft="${k}" rows="${k === 'description' || k === 'first_mes' ? 6 : 3}">${esc(d[k])}</textarea>`}
           ${hint && hint !== 'input' ? `<span class="hint">${esc(hint)}</span>` : ''}
         </label>`).join('')}
       <div class="field">
         <span class="label">Alternate greetings <span class="muted small">(swipe on the first message)</span></span>
         <div id="alt-greetings">
           ${(d.alternate_greetings || []).map((g, i) => `
-            <div class="alt-row"><textarea data-alt="${i}" rows="3">${esc(g)}</textarea>
+            <div class="alt-row"><textarea autocomplete="off" data-alt="${i}" rows="3">${esc(g)}</textarea>
             <button class="icon-btn sm danger" data-action="alt-del" data-i="${i}" aria-label="Remove">${ICONS.trash}</button></div>`).join('')}
         </div>
         <button class="btn sm" data-action="alt-add">${ICONS.plus} Add greeting</button>
       </div>
       <div class="field"><span class="label">Character's Note <span class="hint">(inserted into the chat at a depth every turn; SillyTavern's depth prompt)</span></span>
-        <textarea data-draft-dp="prompt" rows="3">${esc((d.extensions && d.extensions.depth_prompt && d.extensions.depth_prompt.prompt) || '')}</textarea>
+        <textarea autocomplete="off" data-draft-dp="prompt" rows="3">${esc((d.extensions && d.extensions.depth_prompt && d.extensions.depth_prompt.prompt) || '')}</textarea>
         <div class="row wrap">
           <label class="field" style="width:100px"><span class="label">Depth</span><input data-draft-dp="depth" inputmode="numeric" value="${esc((d.extensions && d.extensions.depth_prompt && d.extensions.depth_prompt.depth) ?? 4)}"></label>
           <label class="field grow"><span class="label">Role</span><select data-draft-dp="role">${['system', 'user', 'assistant'].map((r) => `<option ${((d.extensions && d.extensions.depth_prompt && d.extensions.depth_prompt.role) || 'system') === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
@@ -2965,7 +2965,7 @@ function settingsField(label, path, type = 'number', attrs = '', hint = '') {
       <input type="checkbox" data-bind="${path}" ${val ? 'checked' : ''}><i></i></label>`;
   }
   if (type === 'textarea') {
-    return `<label class="field"><span class="label">${label}</span><textarea data-bind="${path}" rows="5">${esc(val)}</textarea>${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
+    return `<label class="field"><span class="label">${label}</span><textarea autocomplete="off" data-bind="${path}" rows="5">${esc(val)}</textarea>${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
   }
   return `<label class="field ${type === 'number' ? 'inline' : ''}"><span class="label">${label}${hint ? `<span class="hint">${hint}</span>` : ''}</span>
     <input type="${type === 'number' ? 'text' : type}" ${type === 'number' ? 'inputmode="decimal" data-num' : ''} data-bind="${path}" value="${esc(val)}" ${attrs} autocomplete="off" autocapitalize="off" spellcheck="false"></label>`;
@@ -3094,7 +3094,7 @@ function renderSettingsView(open) {
       ${(ins.saved || []).map((t) => `<option value="${t.id}" ${ins.template === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
     </select><span class="hint">Pick the one your model was trained on (it's usually on the model's page).</span></label>
     <details class="section"><summary>${savedT ? 'Edit template' : 'Template details'}</summary><div class="sec-body">
-      ${INSTRUCT_FIELDS.map(([k, label]) => `<label class="field"><span class="label">${label}</span><textarea rows="1" data-ins="${k}" ${savedT ? '' : 'readonly'} spellcheck="false">${esc(curT[k] || '')}</textarea></label>`).join('')}
+      ${INSTRUCT_FIELDS.map(([k, label]) => `<label class="field"><span class="label">${label}</span><textarea autocomplete="off" rows="1" data-ins="${k}" ${savedT ? '' : 'readonly'} spellcheck="false">${esc(curT[k] || '')}</textarea></label>`).join('')}
       <label class="field inline"><span class="label">Character names</span><select data-ins-select="names_behavior" ${savedT ? '' : 'disabled'}>
         ${[['force', 'Group chats only'], ['always', 'Always'], ['none', 'Never']].map(([v, l]) => `<option value="${v}" ${curT.names_behavior === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       ${savedT ? '' : '<p class="hint">Built-in templates are read-only — tap “Copy to edit”.</p>'}
@@ -3242,7 +3242,7 @@ function renderSettingsView(open) {
     ${ap.bgImage ? `<label class="field inline"><span class="label">Darken<span class="hint">0–1</span></span><input inputmode="decimal" data-ap-num="bgDim" value="${ap.bgDim}"></label>
       <label class="field inline"><span class="label">Blur<span class="hint">px</span></span><input inputmode="numeric" data-ap-num="bgBlur" value="${ap.bgBlur}"></label>` : ''}
     <details class="section"><summary>Custom CSS</summary><div class="sec-body">
-      <textarea data-ap-css rows="6" spellcheck="false" placeholder=".bubble { border-radius: 4px; }">${esc(ap.customCss || '')}</textarea>
+      <textarea autocomplete="off" data-ap-css rows="6" spellcheck="false" placeholder=".bubble { border-radius: 4px; }">${esc(ap.customCss || '')}</textarea>
     </div></details>
     <div class="row wrap">
       <button class="btn" data-action="ap-save">Save as theme</button>
@@ -3256,7 +3256,7 @@ function renderSettingsView(open) {
   const extBody = `
     <h4 class="sub">✨ Enhance My Reply</h4>
     ${tog('data-ext-enhance-toggle', 'enabled', en.enabled, 'Enabled', 'Shows ✨ next to the message box when you have a draft')}
-    <label class="field"><span class="label">Enhancement prompt</span><textarea data-ext-enhance="prompt" rows="6">${esc(en.prompt)}</textarea></label>
+    <label class="field"><span class="label">Enhancement prompt</span><textarea autocomplete="off" data-ext-enhance="prompt" rows="6">${esc(en.prompt)}</textarea></label>
     <button class="btn sm" data-action="enhance-reset">Reset prompt</button>
     ${ENHANCE_TOGGLES.map(([k, label, hint]) => tog('data-ext-enhance-toggle', k, en[k], label, hint)).join('')}
     <p class="hint">Uses the chat context plus your current connection, model, preset and generation settings. The result replaces your draft but isn't sent.</p>
@@ -3269,7 +3269,7 @@ function renderSettingsView(open) {
     </select></label>
     ${sm.position === 'depth' ? `<label class="field inline"><span class="label">Depth</span><input inputmode="numeric" data-ext-sum="depth" value="${sm.depth}"></label>` : ''}
     <label class="field"><span class="label">Injection template</span><input data-ext-sum="template" value="${esc(sm.template)}"></label>
-    <label class="field"><span class="label">Summary prompt</span><textarea data-ext-sum="prompt" rows="5">${esc(sm.prompt)}</textarea></label>
+    <label class="field"><span class="label">Summary prompt</span><textarea autocomplete="off" data-ext-sum="prompt" rows="5">${esc(sm.prompt)}</textarea></label>
     <p class="hint">Edit or refresh a chat's summary from ✨ → Summary. Your preset can use it anywhere with {{summary}}.</p>
     ${extSections()}
     <h4 class="sub">🧠 Layered memory <span class="muted small">(Summaryception)</span></h4>
@@ -3289,9 +3289,9 @@ function renderSettingsView(open) {
     ${tog('data-ext-mem-toggle', 'auditor', mm.auditor, 'Continuity Auditor', 'After each reply (1:1 chats), tracks scene, bonds (sparks/grudge → hug, handhold, kiss…), agendas and secrets in an <active_continuity> block')}
     ${mm.auditor ? `<label class="field"><span class="label">Auditor model <span class="hint">(optional; a fast one is best)</span></span><input data-ext-mem="auditorModel" value="${esc(mm.auditorModel)}" autocapitalize="off"></label>` : ''}
     <details class="section"><summary>Memory prompts</summary><div class="sec-body">
-      <label class="field"><span class="label">Layer 0 summary</span><textarea data-ext-mem="l0Prompt" rows="7">${esc(mm.l0Prompt)}</textarea></label>
-      <label class="field"><span class="label">Merge (deeper layers)</span><textarea data-ext-mem="mergePrompt" rows="6">${esc(mm.mergePrompt)}</textarea></label>
-      <label class="field"><span class="label">Continuity auditor</span><textarea data-ext-mem="auditorPrompt" rows="8">${esc(mm.auditorPrompt)}</textarea></label>
+      <label class="field"><span class="label">Layer 0 summary</span><textarea autocomplete="off" data-ext-mem="l0Prompt" rows="7">${esc(mm.l0Prompt)}</textarea></label>
+      <label class="field"><span class="label">Merge (deeper layers)</span><textarea autocomplete="off" data-ext-mem="mergePrompt" rows="6">${esc(mm.mergePrompt)}</textarea></label>
+      <label class="field"><span class="label">Continuity auditor</span><textarea autocomplete="off" data-ext-mem="auditorPrompt" rows="8">${esc(mm.auditorPrompt)}</textarea></label>
       <button class="btn sm" data-action="mem-reset-prompts">Reset prompts</button>
     </div></details>
     <p class="hint">Manage a chat's memory from ✨ → Memory, or with /sc-status, /sc-preview, /sc-clear.</p>
@@ -3556,7 +3556,7 @@ function pmEdit(i) {
         </select></label>
         <label class="field" style="width:90px"><span class="label">Depth</span><input id="pm-depth" inputmode="numeric" value="${x.injection_depth ?? 4}"></label>
       </div>
-      <label class="field"><span class="label">Content</span><textarea id="pm-content" rows="14">${esc(x.content)}</textarea>
+      <label class="field"><span class="label">Content</span><textarea autocomplete="off" id="pm-content" rows="14">${esc(x.content)}</textarea>
         <span class="hint">Macros like {{char}}, {{user}}, {{setvar::name::value}}, {{getvar::name}}, {{random::a::b}}, {{trim}} work.</span></label>`}
     <div class="row wrap">
       <button class="btn sm" data-action="pm-move" data-i="${i}" data-dir="-1">Move up</button>
@@ -3633,7 +3633,7 @@ function leEdit(i) {
   openSheet(`
     <div class="sheet-title">${esc(entryTitle(e))}</div>
     <label class="field"><span class="label">Title / memo</span><input id="le-comment" value="${esc(e.comment)}"></label>
-    <label class="field"><span class="label">Content</span><textarea id="le-content" rows="8">${esc(e.content)}</textarea></label>
+    <label class="field"><span class="label">Content</span><textarea autocomplete="off" id="le-content" rows="8">${esc(e.content)}</textarea></label>
     ${chk('le-constant', e.constant, 'Always active', 'Ignore keywords; always insert (still subject to groups & filters)')}
     <label class="field"><span class="label">Keywords <span class="hint">(comma separated, /regex/ allowed)</span></span><input id="le-keys" value="${esc(e.keys.join(', '))}" autocapitalize="off"></label>
     <label class="field"><span class="label">Secondary keywords <span class="hint">(optional)</span></span><input id="le-secondary" value="${esc(e.secondary.join(', '))}" autocapitalize="off"></label>
@@ -3676,10 +3676,10 @@ function regexEdit(i) {
     <div class="sheet-title">${i === -1 ? 'New regex script' : esc(r.scriptName)}</div>
     <label class="field"><span class="label">Script name</span><input id="rx-name" value="${esc(r.scriptName)}"></label>
     <label class="field"><span class="label">Find regex</span><input id="rx-find" value="${esc(r.findRegex)}" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/pattern/g"></label>
-    <label class="field"><span class="label">Replace with <span class="hint">({{match}}, $1, $2, $&lt;name&gt;, macros)</span></span><textarea id="rx-replace" rows="4" spellcheck="false">${esc(r.replaceString)}</textarea></label>
-    <label class="field"><span class="label">Trim out <span class="hint">(one per line, removed from each match first)</span></span><textarea id="rx-trim" rows="2">${esc(r.trimStrings.join('\n'))}</textarea></label>
+    <label class="field"><span class="label">Replace with <span class="hint">({{match}}, $1, $2, $&lt;name&gt;, macros)</span></span><textarea autocomplete="off" id="rx-replace" rows="4" spellcheck="false">${esc(r.replaceString)}</textarea></label>
+    <label class="field"><span class="label">Trim out <span class="hint">(one per line, removed from each match first)</span></span><textarea autocomplete="off" id="rx-trim" rows="2">${esc(r.trimStrings.join('\n'))}</textarea></label>
     <details class="rx-test"><summary>Test mode</summary>
-      <label class="field"><span class="label">Try it on</span><textarea id="rx-test-in" rows="3" spellcheck="false" placeholder="Type or paste some text…"></textarea></label>
+      <label class="field"><span class="label">Try it on</span><textarea autocomplete="off" id="rx-test-in" rows="3" spellcheck="false" placeholder="Type or paste some text…"></textarea></label>
       <div class="field"><span class="label">Result</span><pre id="rx-test-out" class="rx-test-out"></pre></div>
     </details>
     <div class="field"><span class="label">Affects</span>
@@ -3769,7 +3769,7 @@ function renderQrView(id) {
             <button class="icon-btn sm" data-action="qr-up" data-id="${b.id}" aria-label="Move up">↑</button>
             <button class="icon-btn sm danger" data-action="qr-del" data-id="${b.id}" aria-label="Delete">${ICONS.trash}</button>
           </div>
-          <textarea data-qr-message="${b.id}" rows="3" placeholder="Message or /command" spellcheck="false">${esc(b.message)}</textarea>
+          <textarea autocomplete="off" data-qr-message="${b.id}" rows="3" placeholder="Message or /command" spellcheck="false">${esc(b.message)}</textarea>
         </div>`).join('') || '<p class="muted">No buttons yet.</p>'}
       <div class="row wrap">
         <button class="btn" data-action="qr-add">${ICONS.plus} Add button</button>
