@@ -45,17 +45,40 @@ function headers(conn, json = true, plain = false) {
 
 async function apiError(resp) {
   let msg = '';
+  let detail = '';
+  let providerName = '';
   try {
     const text = await resp.text();
+    detail = text.slice(0, 4000);
     try {
       const j = JSON.parse(text);
       msg = (j.error && (j.error.message || j.error)) || j.message || text;
       if (j.error && j.error.metadata && j.error.metadata.raw) msg += ` — ${j.error.metadata.raw}`;
+      providerName = (j.error && j.error.metadata && j.error.metadata.provider_name) || '';
     } catch { msg = text; }
   } catch { /* ignore */ }
   if (typeof msg !== 'string') msg = JSON.stringify(msg);
-  return new Error(`HTTP ${resp.status}${msg ? ': ' + msg.slice(0, 500) : ''}`);
+  const err = new Error(`HTTP ${resp.status}${msg ? ': ' + msg.slice(0, 500) : ''}`);
+  err.status = resp.status;
+  err.detail = detail;
+  err.providerName = providerName;
+  return err;
 }
+
+/** An error sent inside an otherwise successful (streamed) response. */
+function streamError(errObj, info) {
+  const e = errObj || {};
+  const raw = e.metadata && e.metadata.raw ? ` — ${String(e.metadata.raw).slice(0, 300)}` : '';
+  const err = new Error((e.message || (typeof e === 'string' ? e : JSON.stringify(e))) + raw);
+  err.status = Number(e.code) || undefined;
+  err.detail = JSON.stringify(e).slice(0, 4000);
+  err.providerName = (e.metadata && e.metadata.provider_name) || (info && info.provider) || '';
+  return err;
+}
+
+// Every generation is reported here (the app keeps an activity log).
+let genLogger = null;
+export function setGenerateLogger(fn) { genLogger = fn; }
 
 function networkError(e, conn) {
   if (e.name === 'AbortError') return e;
@@ -277,7 +300,30 @@ function earliestStop(text, stops) {
  * think: { prefix, suffix } to move a leading <think> block into the reasoning.
  * Resolves to the final text.
  */
-export async function generate(conn, preset, messages, { signal, onToken, stop = [], think = null, textFormat = null } = {}) {
+export async function generate(conn, preset, messages, opts = {}) {
+  const info = { purpose: opts.purpose || 'background' };
+  const started = Date.now();
+  let text = '';
+  let error = null;
+  try {
+    text = await generateInner(conn, preset, messages, opts, info);
+    return text;
+  } catch (e) {
+    error = e;
+    throw e;
+  } finally {
+    if (genLogger) {
+      try {
+        genLogger({
+          ...info, conn, preset, messages, ms: Date.now() - started, text: text || '',
+          aborted: !!(opts.signal && opts.signal.aborted) || (error && error.name === 'AbortError'), error,
+        });
+      } catch { /* logging must never break a reply */ }
+    }
+  }
+}
+
+async function generateInner(conn, preset, messages, { signal, onToken, stop = [], think = null, textFormat = null } = {}, info = {}) {
   if (!conn) throw new Error('No API connection set up. Go to Settings → Connection.');
   const kind = kindOf(conn);
   if (!conn.model && kind !== 'text') throw new Error('No model selected. Go to Settings → Connection.');
@@ -299,7 +345,10 @@ export async function generate(conn, preset, messages, { signal, onToken, stop =
     if (anth) { const seq = stop.filter((x) => x.trim()).slice(0, 8); if (seq.length) body.stop_sequences = seq; }
     else if (!/api\.openai\.com/.test(url)) body.stop = stop.slice(0, 4); // OpenAI's newer models reject `stop`
   }
+  info.stream = !!body.stream;
+  info.maxTokens = body.max_tokens ?? body.max_completion_tokens ?? null;
   const resp = await doFetch(conn, url, { method: 'POST', headers: headers(conn), body: JSON.stringify(body), signal });
+  info.http = resp.status;
   if (!resp.ok) throw await apiError(resp);
 
   let raw = '';
@@ -321,12 +370,16 @@ export async function generate(conn, preset, messages, { signal, onToken, stop =
     if (anth) {
       raw = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       native = (j.content || []).filter((b) => b.type === 'thinking').map((b) => b.thinking || '').join('\n');
+      Object.assign(info, { id: j.id, model: j.model, finish: j.stop_reason, usage: j.usage, reasoningChars: native.length });
       if (!raw && j.stop_reason === 'refusal') throw new Error('Claude declined to respond (refusal).');
     } else {
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      const c0 = j.choices && j.choices[0];
+      Object.assign(info, { id: j.id, model: j.model, provider: j.provider, finish: c0 && c0.finish_reason, nativeFinish: c0 && c0.native_finish_reason, usage: j.usage });
+      if (j.error) throw streamError(j.error, info);
       raw = (j.choices && j.choices[0] && (j.choices[0].message?.content ?? j.choices[0].text)) || j.content || '';
       const m = j.choices && j.choices[0] && j.choices[0].message;
       native = (m && (m.reasoning || m.reasoning_content)) || '';
+      info.reasoningChars = native.length;
     }
     return emit().text;
   }
@@ -339,6 +392,10 @@ export async function generate(conn, preset, messages, { signal, onToken, stop =
       let j;
       try { j = JSON.parse(data); } catch { continue; }
       if (anth) {
+        if (j.type === 'message_start' && j.message) {
+          info.id = j.message.id; info.model = j.message.model; info.usage = { ...(j.message.usage || {}) };
+        }
+        if (j.type === 'message_delta' && j.usage) info.usage = { ...(info.usage || {}), ...j.usage };
         if (j.type === 'content_block_delta' && j.delta && j.delta.type === 'thinking_delta') {
           native += j.delta.thinking || '';
           emit();
@@ -348,11 +405,17 @@ export async function generate(conn, preset, messages, { signal, onToken, stop =
         } else if (j.type === 'message_delta' && j.delta) {
           stopReason = j.delta.stop_reason || stopReason;
         } else if (j.type === 'error') {
-          throw new Error((j.error && j.error.message) || 'Stream error');
+          throw streamError(j.error || { message: 'Stream error' }, info);
         }
       } else {
-        if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+        if (j.id && !info.id) info.id = j.id;
+        if (j.model && !info.model) info.model = j.model;
+        if (j.provider && !info.provider) info.provider = j.provider;
+        if (j.usage) info.usage = j.usage;
+        if (j.error) throw streamError(j.error, info);
         const choice = j.choices && j.choices[0];
+        if (choice && choice.finish_reason) info.finish = choice.finish_reason;
+        if (choice && choice.native_finish_reason) info.nativeFinish = choice.native_finish_reason;
         const rd = choice && choice.delta && (choice.delta.reasoning || choice.delta.reasoning_content);
         if (rd) { native += rd; emit(); }
         const delta = choice && ((choice.delta && choice.delta.content) || choice.text);
@@ -366,6 +429,9 @@ export async function generate(conn, preset, messages, { signal, onToken, stop =
     throw e;
   }
   if (stopped) { try { resp.body && resp.body.cancel(); } catch { /* already released */ } }
+  if (anth && stopReason) info.finish = stopReason;
+  if (stopped) info.stopString = true;
+  info.reasoningChars = native.length;
   const out = view();
   if (!out.text && !raw && stopReason === 'refusal') throw new Error('Claude declined to respond (refusal).');
   return out.text;

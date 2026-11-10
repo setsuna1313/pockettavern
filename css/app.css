@@ -522,3 +522,16 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 18px 0 6px; }
 .rx-test { margin: 6px 0 10px; }
 .rx-test > summary { cursor: pointer; font-weight: 600; color: var(--accent); padding: 6px 0; }
 .rx-test-out { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg3); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; min-height: 2.4em; margin: 0; font: inherit; font-size: .9rem; }
+
+/* activity log */
+.gen-log { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.gen-entry { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; }
+.gen-entry.ge-error, .gen-entry.ge-blocked { border-color: color-mix(in srgb, #e5484d 60%, var(--line)); }
+.gen-entry.ge-empty, .gen-entry.ge-cut { border-color: color-mix(in srgb, #f5a524 60%, var(--line)); }
+.gen-entry > summary { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; list-style: none; }
+.gen-entry > summary::-webkit-details-marker { display: none; }
+.ge-icon { font-size: 1.1rem; line-height: 1.4; }
+.ge-main { display: flex; flex-direction: column; min-width: 0; font-size: .9rem; }
+.ge-main .hint { font-size: .78rem; overflow-wrap: anywhere; }
+.ge-why { font-size: .82rem; margin-top: 2px; }
+.ge-detail { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; background: var(--bg3); border-radius: 8px; padding: 8px; margin: 8px 0; user-select: text; -webkit-user-select: text; }

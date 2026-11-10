@@ -2,7 +2,7 @@ import * as db from './db.js';
 import * as V from './vault.js';
 import { parseCardFile, blobToAvatar, exportCardPng, toV2, isPng, normalizeCard } from './card.js';
 import { buildPrompt, macros } from './prompt.js';
-import { PROVIDERS, TEXT_SERVERS, diagnose, generate, listModels, generateImage, ttsAudio, listElevenVoices, embed, blobToDataUrl } from './api.js';
+import { PROVIDERS, TEXT_SERVERS, diagnose, generate, setGenerateLogger, listModels, generateImage, ttsAudio, listElevenVoices, embed, blobToDataUrl } from './api.js';
 import { INSTRUCT_TEMPLATES, INSTRUCT_FIELDS, importInstruct, messagesToText } from './instruct.js';
 import * as X from './extras.js';
 import { evaluateMacros } from './macros.js';
@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.9.10';
+const VERSION = '1.10.0';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -529,7 +529,7 @@ function genOptions(kind, speaker) {
     }
   }
   const think = p.reasoning_parse !== false ? { prefix: p.reasoning_prefix || '<think>', suffix: p.reasoning_suffix || '</think>' } : null;
-  return { stop: [...new Set([...custom, ...names])], think, textFormat: isTextConn() ? textFormatter(kind, speaker) : null };
+  return { stop: [...new Set([...custom, ...names])], think, textFormat: isTextConn() ? textFormatter(kind, speaker) : null, purpose: kind };
 }
 
 const connFor = (model) => { const c = activeConn(); return c && model ? { ...c, model } : c; };
@@ -539,7 +539,7 @@ async function memCall(system, user, maxTokens, model) {
   const conn = connFor(model);
   if (!connReady(conn)) throw new Error('No API connection.');
   const preset = { ...S.settings.preset, stream: false, max_tokens: maxTokens };
-  return generate(conn, preset, [{ role: 'system', content: system }, { role: 'user', content: user }], { textFormat: isTextConn(conn) ? textFormatter('quiet') : null });
+  return generate(conn, preset, [{ role: 'system', content: system }, { role: 'user', content: user }], { textFormat: isTextConn(conn) ? textFormatter('quiet') : null, purpose: 'memory' });
 }
 
 /** Compress old chat into Layer 0 memories, then merge crowded layers. mode: auto | force | slop */
@@ -810,7 +810,7 @@ function scriptApi(chat) {
     genraw: async (prompt) => {
       const conn = activeConn();
       if (!connReady(conn)) throw new Error('Set up an API connection first.');
-      return normalizeGeneratedText(await generate(conn, { ...S.settings.preset, stream: false }, [{ role: 'user', content: prompt }]));
+      return normalizeGeneratedText(await generate(conn, { ...S.settings.preset, stream: false }, [{ role: 'user', content: prompt }], { purpose: 'script' }));
     },
     impersonate: () => runImpersonate(),
     cont: () => runGeneration('continue', lastSpeakerId()),
@@ -1439,6 +1439,118 @@ async function exportPersona() {
     tags: ['persona'], avatar: p.avatar, extensions: { [PERSONA_MARK]: true },
   };
   await saveFile(await exportCardPng(card), `${safeName(p.name)} (persona).png`);
+}
+
+// ---------- activity log (the phone's answer to SillyTavern's console window) ----------
+// One entry per generation: what was asked, what came back, and why it failed or came
+// back empty. Never stores API keys or chat text.
+const GEN_LOG_MAX = 60;
+let genLog = null;
+const PURPOSE_LABEL = { reply: 'Reply', continue: 'Continue', impersonate: 'Impersonate', quiet: 'Background task', memory: 'Memory / summary', script: 'Script', test: 'Connection test', background: 'Background task' };
+
+async function loadGenLog() {
+  if (!genLog) { try { genLog = (await db.get('kv', 'gen-log')) || []; } catch { genLog = []; } }
+  return genLog;
+}
+
+const BLOCK_REASONS = /safety|prohibited|blocklist|spii|recitation|content_filter|refusal|image_safety/i;
+function genStatus(e) {
+  if (e.aborted && !e.error) return 'stopped';
+  if (e.error) return 'error';
+  if (BLOCK_REASONS.test(`${e.finish || ''} ${e.nativeFinish || ''}`)) return 'blocked';
+  if (!String(e.text || '').trim()) return 'empty';
+  if (/^(length|max_tokens|MAX_TOKENS)$/i.test(e.finish || '') || /MAX_TOKENS/i.test(e.nativeFinish || '')) return 'cut';
+  return 'ok';
+}
+
+/** A plain-language reason and what to try. */
+function genExplain(x) {
+  const http = x.http || x.errStatus;
+  const msg = String(x.error || '');
+  if (x.status === 'stopped') return ['You stopped it.', ''];
+  if (x.status === 'cut') return ['The reply hit the Max response tokens limit and was cut off.', `Raise Max response tokens (now ${x.maxTokens ?? '?'}) in Settings → Generation, or tap Continue. On thinking models the thinking counts toward this limit too.`];
+  if (x.status === 'blocked') return [`The model's provider blocked this reply${x.providerName ? ` (${x.providerName})` : ''} — reason: ${x.nativeFinish || x.finish}.`, 'Swipe to try again, rephrase your last message, or try another model.'];
+  if (x.status === 'empty') return [`The model finished without writing anything${x.finish ? ` (finish reason: ${x.finish}${x.nativeFinish && x.nativeFinish !== x.finish ? ` / ${x.nativeFinish}` : ''})` : ''}.`, 'Usually a temporary hiccup at the provider — swipe to retry. If it keeps happening with one model, its provider may be quietly filtering the request; try another model or provider.'];
+  if (x.status === 'error') {
+    if (/could not reach|Failed to fetch|NetworkError|Load failed/i.test(msg)) return ['Your phone could not reach the server.', 'Check your connection, VPN, ad blocker or DNS filter, then try again.'];
+    if (http === 401 || /invalid.*key|no auth|unauthori[sz]ed/i.test(msg)) return ['The API key was rejected.', 'Paste the key again in Settings → API connection (it may have been deleted or mistyped).'];
+    if (http === 402 || /credit|insufficient|payment|balance/i.test(msg)) return ['Out of credits (or a spending limit was reached).', 'Add credit or raise the key\'s limit on the provider\'s website.'];
+    if (http === 429 || /rate.?limit|too many requests|quota/i.test(msg)) return ['Rate-limited: too many requests, or the free tier quota ran out.', 'Wait a minute and try again, or use a paid model/provider.'];
+    if (/context|too long|maximum.*tokens|token limit|prompt is too long/i.test(msg)) return ['The prompt was too long for this model.', 'Lower Context size in Settings → Generation, or turn off big lorebooks / prompts.'];
+    if (http === 404 || /model.*(not found|does not exist|unavailable)|no endpoints/i.test(msg)) return ['That model isn\'t available.', 'Check the model name in Settings → API connection (tap Browse to pick one).'];
+    if (http === 400) return ['The provider rejected the request.', 'The full message below usually names the setting it didn\'t like (for example a temperature or option this model doesn\'t support).'];
+    if (http === 403 || /moderation|flagged|safety/i.test(msg)) return ['The provider refused the request (moderation or access).', 'Try another model or provider, or rephrase.'];
+    if (http >= 500 || /overloaded|timeout|timed out|unavailable|bad gateway/i.test(msg)) return ['The provider had a problem on their end (overloaded or down).', 'Wait a moment and try again, or pick another provider.'];
+    return ['The request failed.', 'See the full message below.'];
+  }
+  return ['Worked.', ''];
+}
+
+function recordGeneration(d) {
+  const entry = {
+    at: Date.now(), purpose: d.purpose, chat: S.char ? S.char.name : '', provider: d.conn && d.conn.provider, model: d.conn && d.conn.model,
+    modelUsed: d.model || '', providerName: d.provider || (d.error && d.error.providerName) || '', http: (d.error && d.error.status) || d.http || null,
+    ms: d.ms, stream: d.stream, maxTokens: d.maxTokens, finish: d.finish || '', nativeFinish: d.nativeFinish || '', usage: d.usage || null, id: d.id || '',
+    promptMessages: (d.messages || []).length, promptTokens: (d.messages || []).reduce((n, m) => n + MEM.estTokens(typeof m.content === 'string' ? m.content : ''), 0),
+    replyChars: String(d.text || '').length, reasoningChars: d.reasoningChars || 0, stopString: !!d.stopString,
+    error: d.error && d.error.name !== 'AbortError' ? String(d.error.message || d.error) : '', detail: d.error && d.error.detail ? String(d.error.detail) : '',
+    aborted: d.aborted, text: d.text,
+  };
+  entry.status = genStatus(entry);
+  delete entry.text; delete entry.aborted;
+  S.lastGen = entry;
+  loadGenLog().then((log) => {
+    log.unshift(entry);
+    log.length = Math.min(log.length, GEN_LOG_MAX);
+    db.put('kv', log, 'gen-log').catch(() => {});
+    if (document.getElementById('gen-log-list')) renderGenLogList();
+  });
+}
+setGenerateLogger(recordGeneration);
+
+const GEN_ICON = { ok: '✅', error: '❌', empty: '⚠️', cut: '✂️', blocked: '🚫', stopped: '⏹' };
+const GEN_TITLE = { ok: 'Worked', error: 'Failed', empty: 'Empty reply', cut: 'Cut off', blocked: 'Blocked', stopped: 'Stopped' };
+
+function genDetailsText(x) {
+  const [why, hint] = genExplain(x);
+  const u = x.usage || {};
+  const inTok = u.prompt_tokens ?? u.input_tokens;
+  const outTok = u.completion_tokens ?? u.output_tokens;
+  return [
+    `${GEN_TITLE[x.status]} — ${new Date(x.at).toLocaleString()}`,
+    `What: ${PURPOSE_LABEL[x.purpose] || x.purpose}${x.chat ? ` (${x.chat})` : ''}`,
+    `Model: ${x.model}${x.modelUsed && x.modelUsed !== x.model ? ` → answered by ${x.modelUsed}` : ''}${x.providerName ? ` via ${x.providerName}` : ''} [${x.provider}]`,
+    `Why: ${why}`, hint ? `Try: ${hint}` : '',
+    x.http ? `HTTP status: ${x.http}` : '',
+    x.finish || x.nativeFinish ? `Finish reason: ${x.finish || '—'}${x.nativeFinish ? ` (provider: ${x.nativeFinish})` : ''}` : '',
+    `Sent: ${x.promptMessages} messages, ≈${x.promptTokens} tokens${inTok != null ? ` (provider counted ${inTok})` : ''}; max reply ${x.maxTokens ?? '?'} tokens`,
+    `Got: ${x.replyChars} characters${outTok != null ? `, ${outTok} tokens` : ''}${x.reasoningChars ? `, ${x.reasoningChars} characters of thinking` : ''}${x.stopString ? ' (stopped at a stop string)' : ''}`,
+    `Took: ${(x.ms / 1000).toFixed(1)} s${x.stream ? ' (streamed)' : ''}`,
+    x.id ? `Generation ID: ${x.id}` : '',
+    x.error ? `Error: ${x.error}` : '',
+    x.detail && x.detail !== x.error ? `Provider's full answer: ${x.detail}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderGenLogList() {
+  const box = document.getElementById('gen-log-list');
+  if (!box) return;
+  const log = genLog || [];
+  box.innerHTML = log.length ? log.map((x, i) => {
+    const [why] = genExplain(x);
+    return `<details class="gen-entry ge-${x.status}"><summary><span class="ge-icon">${GEN_ICON[x.status]}</span><span class="ge-main"><span><b>${GEN_TITLE[x.status]}</b> · ${esc(PURPOSE_LABEL[x.purpose] || x.purpose)}${x.chat ? ` · ${esc(x.chat)}` : ''}</span><span class="hint">${esc(new Date(x.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }))} · ${esc(x.model || '')}</span>${x.status !== 'ok' ? `<span class="ge-why">${esc(why)}</span>` : ''}</span></summary>
+      <pre class="ge-detail">${esc(genDetailsText(x))}</pre>
+      <button class="btn sm" data-action="gen-log-copy" data-i="${i}">${ICONS.copy || ''} Copy details</button></details>`;
+  }).join('') : '<p class="muted">Nothing yet. Every reply, swipe and background task will show up here.</p>';
+}
+
+async function openGenLog() {
+  await loadGenLog();
+  openSheet(`<div class="sheet-title">Activity log</div>
+    <p class="hint">What happened with each reply — like SillyTavern's console window. Tap one for details. API keys and chat text are never saved here.</p>
+    <div id="gen-log-list" class="gen-log"></div>
+    <div class="row wrap"><button class="btn sm danger" data-action="gen-log-clear">Clear log</button></div>`, 'tall');
+  renderGenLogList();
 }
 
 /** Import anything SillyTavern exports: character cards, presets, lorebooks, regex scripts. */
@@ -2467,9 +2579,13 @@ async function runGeneration(mode, speakerId) {
   if (S.chat === chat) { renderMessages(); updateSendButton(); }
   if (failed) {
     console.error(failed);
-    toast(failed.message || String(failed), 8000);
+    const [why] = S.lastGen && S.lastGen.status === 'error' ? genExplain(S.lastGen) : [''];
+    toast(`${why ? `${why} ` : ''}${failed.message || String(failed)} — details in ⋯ → Activity log.`, 9000);
     S.stopGroup = true;
+  } else if (!(msg.swipes[idx] || '').trim() && S.lastGen && ['empty', 'blocked'].includes(S.lastGen.status)) {
+    toast(`No reply came back. ${genExplain(S.lastGen)[0]} Details in ⋯ → Activity log.`, 9000);
   } else if (msg.swipes[idx] && msg.swipes[idx].trim()) {
+    if (S.lastGen && S.lastGen.status === 'cut' && S.lastGen.purpose !== 'quiet') toast('The reply was cut off at the Max response tokens limit. Tap Continue, or raise the limit in Settings → Generation.', 6000);
     maybeSummarize(chat);
     runAuditor(chat, msg).then(() => runMemory(chat, 'auto'));
     const ex = S.settings.ext;
@@ -2514,7 +2630,7 @@ async function runImpersonate() {
     const out = (text || input.value || '').replace(/^\s+/, '').replace(new RegExp(`^${(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*`), '');
     if (S.chat === chat) { input.value = out; setDraft(chat.id, out); autosize(input); }
   } catch (e) {
-    if (e.name !== 'AbortError') toast(e.message || String(e), 8000);
+    if (e.name !== 'AbortError') toast(`${e.message || String(e)} — details in ⋯ → Activity log.`, 9000);
   } finally {
     S.generating = null;
     S.abort = null;
@@ -2570,6 +2686,7 @@ function chatMenu() {
       <button data-action="new-chat">${ICONS.plus}<span>New chat</span></button>
       <button data-action="go" data-to="#/${S.group ? 'group' : 'edit'}/${S.char.id}">${ICONS.edit}<span>Edit ${S.group ? 'group' : 'character'}</span></button>
       <button data-action="view-prompt">${ICONS.eye}<span>View prompt</span></button>
+      <button data-action="gen-log">${ICONS.list || ICONS.eye}<span>Activity log</span></button>
       <button data-action="go" data-to="#/search/${S.chat.id}">${ICONS.search}<span>Search this chat</span></button>
       ${activePreset() ? `<button data-action="go" data-to="#/preset/${activePreset().id}">${ICONS.sliders}<span>Prompt toggles</span></button>` : ''}
       ${S.group ? '' : `<button data-action="persona-lock">${ICONS.user}<span>${S.char.personaId === S.settings.activePersona ? `Unlock persona` : `Lock persona “${esc(activePersona().name)}”`}</span></button>`}
@@ -2610,6 +2727,7 @@ function quickActions() {
       <button data-action="qa-summary">${ICONS.note}<span>Summary${S.chat.summary && S.chat.summary.text ? ' •' : ''}</span></button>
       ${S.settings.ext.memory.enabled || S.chat.mem ? `<button data-action="qa-memory">${ICONS.layers}<span>Memory</span></button>` : ''}
       <button data-action="view-prompt">${ICONS.eye}<span>View prompt</span></button>
+      <button data-action="gen-log">${ICONS.list || ICONS.eye}<span>Activity log</span></button>
       ${activePreset() ? `<button data-action="go" data-to="#/preset/${activePreset().id}">${ICONS.sliders}<span>Prompt toggles</span></button>` : ''}
     </div>
     ${S.group ? `
@@ -3193,6 +3311,7 @@ function renderSettingsView(open) {
       <button class="btn primary" data-action="import-zip">${ICONS.import} Import SillyTavern data (.zip)</button>
     </div>
     <div class="row wrap">
+      <button class="btn" data-action="gen-log">Activity log</button>
       <button class="btn" data-action="backup-export">${ICONS.download} Export backup / sync file</button>
       <button class="btn" data-action="backup-import">${ICONS.import} Restore / sync from file</button>
     </div>
@@ -3342,7 +3461,7 @@ async function testConnection() {
     const text = await generate(conn, { ...S.settings.preset, max_tokens: 200, stream: false }, [
       { role: 'system', content: 'You are a connection test.' },
       { role: 'user', content: 'Reply with just the word OK.' },
-    ], { textFormat: isTextConn(conn) ? textFormatter('quiet') : null });
+    ], { textFormat: isTextConn(conn) ? textFormatter('quiet') : null, purpose: 'test' });
     toast(`Connected ✓ ${text ? '— model said: ' + text.trim().slice(0, 60) : ''}`, 4000);
   } catch (e) {
     if (!/Network error/.test(e.message)) { toast(e.message, 8000); return; }
@@ -4220,6 +4339,14 @@ const actions = {
     if (el.dataset.id === S.chat.id) { closeSheet(); go(`#/chat/${S.char.id}/${S.chats[0] ? S.chats[0].id : ''}`); render(); } else chatMenu();
   },
   'view-prompt': viewPrompt,
+  'gen-log': openGenLog,
+  'gen-log-clear': async () => { if (!confirm('Clear the activity log?')) return; genLog = []; await db.put('kv', [], 'gen-log'); renderGenLogList(); },
+  'gen-log-copy': async (el) => {
+    const x = (genLog || [])[+el.dataset.i];
+    if (!x) return;
+    const text = genDetailsText(x);
+    try { await navigator.clipboard.writeText(text); toast('Copied. Paste it wherever you need help.'); } catch { toast('Couldn\'t copy — press and hold the details to select them.'); }
+  },
   'export-chat': exportChat,
   'import-chat': importChat,
 
