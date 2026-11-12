@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.2';
+const VERSION = '1.10.3';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -721,6 +721,54 @@ function updateEnhanceButton() {
 }
 
 // ---------- Summarize ----------
+/** Plain readable text of a message for summaries: no HTML, styling or code-block boards. */
+function plainForSummary(t) {
+  return String(t || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Like SillyTavern's "Raw" summary mode: only the summary instructions, the previous
+ * summary and the chat are sent — not the preset — so preset rules (info boards,
+ * commentary, formats) can't take over the summary.
+ */
+async function rawSummary(chat, prompt, maxTokens) {
+  const conn = activeConn();
+  if (!connReady(conn)) throw new Error('Set up an API connection first (Settings → Connection).');
+  const ctx = Number(S.settings.preset.context_size) || 32000;
+  let budget = Math.max(2000, (ctx - maxTokens - 1500) * 3.5); // characters of chat that fit
+  const lines = [];
+  let cut = false;
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    const m = chat.messages[i];
+    if (m.hidden) continue;
+    const speaker = m.role === 'assistant' ? (speakerOf(m) || S.char) : S.char;
+    const env = { char: speaker ? speaker.name : '', user: activePersona().name || 'User', vars: { ...(chat.vars || {}) } };
+    const text = plainForSummary(evaluateMacros(m.swipes ? m.swipes[m.swipeIdx] : m.text, env));
+    if (!text) continue;
+    const line = `${memNameOf(m)}: ${text}`;
+    if (line.length > budget && lines.length) { cut = true; break; }
+    lines.unshift(line);
+    budget -= line.length;
+  }
+  const prev = chat.summary && chat.summary.text ? chat.summary.text.trim() : '';
+  const charName = S.char ? S.char.name : 'the character';
+  const system = `You write concise, factual summaries of an ongoing story between ${activePersona().name || 'the user'} and ${charName}. Write plain prose only: no headings, boards, tables, HTML, code blocks or commentary.`;
+  const user = [
+    prev ? `Previous summary (keep its facts, update and extend it):\n${prev}` : '',
+    `Story so far${cut ? ' (earlier parts are covered by the previous summary)' : ''}:\n${lines.join('\n\n')}`,
+    prompt,
+  ].filter(Boolean).join('\n\n---\n\n');
+  const preset = { ...S.settings.preset, stream: false, max_tokens: maxTokens };
+  return generate(conn, preset, [{ role: 'system', content: system }, { role: 'user', content: user }],
+    { textFormat: isTextConn(conn) ? textFormatter('quiet') : null, purpose: 'summary' });
+}
+
 async function summarizeChat(chat = S.chat, { silent = false } = {}) {
   if (S.summarizing) return;
   const cfg = S.settings.ext.summarize;
@@ -729,7 +777,11 @@ async function summarizeChat(chat = S.chat, { silent = false } = {}) {
   if (!silent) toast('Summarizing…', 20000);
   try {
     const prompt = (cfg.prompt || '').replace(/\{\{words\}\}/gi, String(cfg.words || 200));
-    const text = normalizeGeneratedText(await quietGenerate(prompt, { chat, maxTokens: Math.max(300, Math.round((cfg.words || 200) * 2.5)) }));
+    // Room for the summary plus any thinking the model does first.
+    const maxTokens = Math.max(1500, Math.round((cfg.words || 200) * 4));
+    const text = normalizeGeneratedText(cfg.mode === 'classic'
+      ? await quietGenerate(prompt, { chat, maxTokens })
+      : await rawSummary(chat, prompt, maxTokens));
     if (!text) throw new Error('The model returned an empty summary.');
     chat.summary = { text, upTo: chat.messages.length, at: Date.now() };
     await saveChat(chat);
@@ -1457,7 +1509,7 @@ async function exportPersona() {
 // back empty. Never stores API keys or chat text.
 const GEN_LOG_MAX = 60;
 let genLog = null;
-const PURPOSE_LABEL = { reply: 'Reply', continue: 'Continue', impersonate: 'Impersonate', quiet: 'Background task', memory: 'Memory / summary', script: 'Script', test: 'Connection test', background: 'Background task' };
+const PURPOSE_LABEL = { summary: 'Summary', reply: 'Reply', continue: 'Continue', impersonate: 'Impersonate', quiet: 'Background task', memory: 'Memory / summary', script: 'Script', test: 'Connection test', background: 'Background task' };
 
 async function loadGenLog() {
   if (!genLog) { try { genLog = (await db.get('kv', 'gen-log')) || []; } catch { genLog = []; } }
@@ -3263,6 +3315,10 @@ function renderSettingsView(open) {
     <h4 class="sub">📝 Summarize</h4>
     ${tog('data-ext-sum-toggle', 'enabled', sm.enabled, 'Enabled', 'Keeps a running summary of each chat and adds it to the prompt')}
     <label class="field inline"><span class="label">Update every<span class="hint">messages</span></span><input inputmode="numeric" data-ext-sum="every" value="${sm.every}"></label>
+    <label class="field inline"><span class="label">Prompt builder</span><select data-ext-sum-select="mode">
+      ${[['raw', 'Raw — summary prompt + chat only'], ['classic', 'Classic — through your preset']].map(([k, v]) => `<option value="${k}" ${(sm.mode === 'classic' ? 'classic' : 'raw') === k ? 'selected' : ''}>${v}</option>`).join('')}
+    </select></label>
+    <p class="hint">Raw is best with big presets: their rules (info boards, commentary, formats) aren't sent, so they can't take over the summary.</p>
     <label class="field inline"><span class="label">Summary length<span class="hint">words</span></span><input inputmode="numeric" data-ext-sum="words" value="${sm.words}"></label>
     <label class="field inline"><span class="label">Insert</span><select data-ext-sum-select="position">
       ${[['top', 'At the top of the prompt'], ['depth', 'In chat @ depth'], ['macro', 'Only via {{summary}}']].map(([k, v]) => `<option value="${k}" ${sm.position === k ? 'selected' : ''}>${v}</option>`).join('')}

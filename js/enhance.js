@@ -57,6 +57,7 @@ export const DEFAULT_SUMMARY_PROMPT = 'Ignore previous instructions. Summarize t
 
 export const DEFAULT_SUMMARIZE_SETTINGS = Object.freeze({
   enabled: false,
+  mode: 'raw', // 'raw' = summary prompt + chat only; 'classic' = through the preset
   prompt: DEFAULT_SUMMARY_PROMPT,
   words: 200,
   every: 10,
