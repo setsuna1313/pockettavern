@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.3';
+const VERSION = '1.10.4';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -34,7 +34,7 @@ function defaultSettings() {
     prompt: {
       main: DEFAULT_MAIN, post_history: '',
       prefer_card_system: true, prefer_card_post_history: true, wi_scan_depth: 4,
-      wi_budget: 25, wi_recursion: true, wi_max_recursion: 3,
+      wi_budget: 25, wi_recursion: false, wi_max_recursion: 3,
     },
     personas: [{ id: pid, name: 'User', description: '', avatar: null }],
     activePersona: pid,
@@ -5010,7 +5010,16 @@ async function boot() {
     appearance: { ...def.appearance, ...(settings.appearance || {}) },
   } : def;
   if (!S.settings.personas || !S.settings.personas.length) { S.settings.personas = def.personas; S.settings.activePersona = def.activePersona; }
+  // One-time update (1.10.4): lorebook scan depth 4 and recursive scan off are now the
+  // defaults; apply them to existing installs once. Changing them afterwards sticks.
+  if (settings && !settings.wiDefaults1104) {
+    S.settings.prompt.wi_scan_depth = 4;
+    S.settings.prompt.wi_recursion = false;
+  }
+  const wiMigrated = !!(settings && !settings.wiDefaults1104);
+  S.settings.wiDefaults1104 = true;
   await V.loadSecrets(S.settings);
+  if (wiMigrated) await saveSettings(true);
   // Older versions stored keys in plain text: move them into the vault now.
   const plainKeys = settings && Object.keys(V.takeSecrets(structuredClone(settings))).length;
   if (!settings || plainKeys) await saveSettings(true);
