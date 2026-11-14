@@ -60,3 +60,11 @@ To build an APK, see [ANDROID.md](ANDROID.md).
 ## Development
 No build step. Serve the folder with any static server, e.g. `python3 -m http.server`.
 When you change files, bump `CACHE` in `sw.js`.
+
+## License
+PocketTavern is released under the [MIT License](LICENSE): you're free to fork it, change it and share it,
+as long as you keep the copyright and license notice.
+
+It includes [DOMPurify](https://github.com/cure53/DOMPurify) (`js/vendor/purify.js`), which keeps its own
+license (Apache 2.0 / MPL 2.0) as stated in that file. PocketTavern is an independent project inspired by
+SillyTavern and does not contain SillyTavern code.
