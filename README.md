@@ -4,6 +4,10 @@ A SillyTavern-style character chat app for iPhone and Android, built as an insta
 It runs entirely on your device: characters, chats and API keys are stored locally in the browser and
 requests go straight from your phone to the AI provider.
 
+**▶ Open the app: <https://setsuna1313.github.io/pockettavern/>**
+Install it to your home screen: on iPhone/iPad open it in Safari → Share → *Add to Home Screen*;
+on Android open it in Chrome → *Install* (or ⋮ → *Add to Home screen*). It also works in any desktop browser.
+
 ## Features
 - Import SillyTavern / TavernAI character cards (PNG or JSON, V1/V2/V3) and export them back as PNG cards
 - **SillyTavern chat-completion presets**: full prompt manager with on/off toggles, prompt editing and reordering,
