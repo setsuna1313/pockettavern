@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.4';
+const VERSION = '1.10.5';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1165,6 +1165,16 @@ async function render() {
   S.openActions = null;
   S.editing = null;
   document.documentElement.style.setProperty('--font', `${S.settings.ui.fontSize || 16}px`);
+  // Leaving Settings: remember which sections were open and the scroll position, so
+  // Back from a lorebook / preset / quick reply set lands where you were.
+  if (S.curRoute === 'settings' && r.name !== 'settings') {
+    S.settingsUI = {
+      open: [...document.querySelectorAll('details.section[data-sec][open]')].map((d) => d.dataset.sec),
+      scroll: $('main.scroll')?.scrollTop || 0,
+    };
+  }
+  const cameFrom = S.curRoute;
+  S.curRoute = r.name;
   if (r.name !== 'preset' && r.name !== 'lorebook' && r.name !== 'qr') app.dataset.view = '';
   if (r.name !== 'group') S.groupDraft = null;
   try {
@@ -1175,7 +1185,15 @@ async function render() {
     else if (r.name === 'qr' && r.a) renderQrView(r.a);
     else if (r.name === 'search') await renderSearchView(r.a);
     else if (r.name === 'lorebook' && r.a) renderLorebookView(r.a);
-    else if (r.name === 'settings') renderSettingsView(r.a);
+    else if (r.name === 'settings') {
+      renderSettingsView(r.a);
+      if (!r.a && SETTINGS_CHILDREN.has(cameFrom) && S.settingsUI) {
+        const { open, scroll } = S.settingsUI;
+        document.querySelectorAll('details.section[data-sec]').forEach((d) => { if (open.includes(d.dataset.sec)) d.open = true; });
+        const m = $('main.scroll');
+        if (m) { m.scrollTop = scroll; requestAnimationFrame(() => { m.scrollTop = scroll; }); }
+      }
+    }
     else await renderHome();
   } catch (e) {
     console.error(e);
@@ -1184,6 +1202,8 @@ async function render() {
   }
 }
 window.addEventListener('hashchange', render);
+// Screens opened from inside Settings; Back from these returns to Settings as you left it.
+const SETTINGS_CHILDREN = new Set(['preset', 'lorebook', 'qr']);
 
 // ---------- HOME ----------
 const lib = () => S.settings.library || (S.settings.library = { sort: 'recent', favFirst: true, folders: [] });
