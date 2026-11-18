@@ -20,7 +20,19 @@ const kindOf = (conn) => (PROVIDERS[conn.provider] || PROVIDERS.openai).kind;
 
 export function baseUrl(conn) {
   const p = PROVIDERS[conn.provider] || PROVIDERS.openai;
+  // Claude through a reverse proxy (like SillyTavern's "Reverse Proxy"): requests go to <proxy>/messages.
+  if (conn.provider === 'anthropic' && String(conn.proxyUrl || '').trim()) return proxyBase(conn.proxyUrl);
   return ((p.needsUrl && conn.baseUrl) ? conn.baseUrl : p.base).trim().replace(/\/+$/, '');
+}
+
+/** A pasted proxy address, without a trailing slash or an endpoint path people often copy along. */
+function proxyBase(u) {
+  return String(u).trim().replace(/\/+$/, '').replace(/\/(messages|chat\/completions|completions|models)$/i, '').replace(/\/+$/, '');
+}
+const viaProxy = (conn) => conn && conn.provider === 'anthropic' && !!String(conn.proxyUrl || '').trim();
+/** The same proxy address with "/v1" toggled — proxies disagree on whether it's part of the address. */
+function proxyAlt(url) {
+  return /\/v1(\/|$)/.test(url) ? url.replace(/\/v1(?=\/|$)/, '') : url.replace(/\/(messages|models)(\?.*)?$/, '/v1/$1$2');
 }
 
 // If a browser refuses OpenRouter's optional attribution headers, we stop sending them.
@@ -33,6 +45,8 @@ function headers(conn, json = true, plain = false) {
     h['x-api-key'] = conn.apiKey || '';
     h['anthropic-version'] = '2023-06-01';
     h['anthropic-dangerous-direct-browser-access'] = 'true';
+    // Proxies differ in which header they read the password from; send it both ways.
+    if (viaProxy(conn) && conn.apiKey) h.authorization = `Bearer ${conn.apiKey}`;
     return h;
   }
   if (conn.apiKey) h.authorization = `Bearer ${conn.apiKey}`;
@@ -100,7 +114,15 @@ function hostOf(conn) {
 
 async function doFetch(conn, url, opts) {
   try {
-    return await fetch(url, opts);
+    const r = await fetch(url, opts);
+    // A Claude proxy that 404s may just want the address with/without "/v1": try the other once.
+    if (r.status === 404 && viaProxy(conn)) {
+      const alt = proxyAlt(url);
+      if (alt !== url) {
+        try { const r2 = await fetch(alt, opts); if (r2.status !== 404) return r2; } catch { /* keep the first answer */ }
+      }
+    }
+    return r;
   } catch (e) {
     // Retry OpenRouter once without the optional attribution headers (some browsers/blockers reject them).
     if (e.name !== 'AbortError' && conn.provider === 'openrouter' && !openrouterPlain && opts && opts.headers && opts.headers['X-Title']) {
@@ -123,7 +145,7 @@ async function doFetch(conn, url, opts) {
  */
 export async function diagnose(conn) {
   const host = hostOf(conn);
-  const probe = conn.provider === 'anthropic' ? 'https://api.anthropic.com/v1/models' : `${baseUrl(conn)}/models`;
+  const probe = conn.provider === 'anthropic' && !viaProxy(conn) ? 'https://api.anthropic.com/v1/models' : `${baseUrl(conn)}/models`;
   try {
     await fetch(probe, { method: 'GET', mode: 'cors', cache: 'no-store' });
     return `This device can reach ${host}, so the problem is with the request itself — check the key and model, or try again.`;

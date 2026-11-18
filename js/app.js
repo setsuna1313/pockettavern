@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.6';
+const VERSION = '1.10.7';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1560,7 +1560,7 @@ function genExplain(x) {
     if (http === 402 || /credit|insufficient|payment|balance/i.test(msg)) return ['Out of credits (or a spending limit was reached).', 'Add credit or raise the key\'s limit on the provider\'s website.'];
     if (http === 429 || /rate.?limit|too many requests|quota/i.test(msg)) return ['Rate-limited: too many requests, or the free tier quota ran out.', 'Wait a minute and try again, or use a paid model/provider.'];
     if (/context|too long|maximum.*tokens|token limit|prompt is too long/i.test(msg)) return ['The prompt was too long for this model.', 'Lower Context size in Settings → Generation, or turn off big lorebooks / prompts.'];
-    if (http === 404 || /model.*(not found|does not exist|unavailable)|no endpoints/i.test(msg)) return ['That model isn\'t available.', 'Check the model name in Settings → API connection (tap Browse to pick one).'];
+    if (http === 404 || /model.*(not found|does not exist|unavailable)|no endpoints/i.test(msg)) return x.keyHint ? ['The server didn\'t recognise that address.', x.keyHint] : ['That model isn\'t available.', 'Check the model name in Settings → API connection (tap Browse to pick one).'];
     if (http === 400) return ['The provider rejected the request.', 'The full message below usually names the setting it didn\'t like (for example a temperature or option this model doesn\'t support).'];
     if (http === 403 || /moderation|flagged|safety/i.test(msg)) return ['The provider refused the request (moderation or access).', 'Try another model or provider, or rephrase.'];
     if (http >= 500 || /overloaded|timeout|timed out|unavailable|bad gateway/i.test(msg)) return ['The provider had a problem on their end (overloaded or down).', 'Wait a moment and try again, or pick another provider.'];
@@ -1580,6 +1580,7 @@ const keyKind = (key) => { const k = String(key || '').trim(); const m = KEY_KIN
 /** A plain hint when the saved key clearly belongs to a different provider than the one selected. */
 function keyMismatchHint(conn) {
   if (!conn || !conn.apiKey) return '';
+  if (conn.provider === 'anthropic' && String(conn.proxyUrl || '').trim()) return '';
   const kind = keyKind(conn.apiKey);
   if (!kind) return '';
   if (conn.provider === 'anthropic' && kind.id !== 'anthropic') {
@@ -1599,6 +1600,16 @@ function keyMismatchHint(conn) {
   return '';
 }
 
+/** A 404 from an address that is really a Claude-format proxy, picked as OpenAI-compatible. */
+function notFoundHint(conn) {
+  if (!conn) return '';
+  if (conn.provider === 'openai' && /anthropic|claude/i.test(conn.baseUrl || '')) {
+    return 'This address looks like a Claude (Anthropic-format) proxy. Set Provider to Claude (Anthropic) and paste the address into Reverse proxy instead.';
+  }
+  if (conn.provider === 'anthropic' && conn.proxyUrl) return 'The proxy didn\'t recognise that address. Check the proxy\'s instructions for the exact URL (often ending in /v1, sometimes /anthropic/v1), and the model name it expects.';
+  return '';
+}
+
 function recordGeneration(d) {
   const entry = {
     at: Date.now(), purpose: d.purpose, chat: S.char ? S.char.name : '', provider: d.conn && d.conn.provider, model: d.conn && d.conn.model,
@@ -1611,6 +1622,7 @@ function recordGeneration(d) {
   };
   entry.status = genStatus(entry);
   if (entry.status === 'error' && (entry.http === 401 || /invalid.*key|unauthori[sz]ed/i.test(entry.error))) entry.keyHint = keyMismatchHint(d.conn);
+  if (entry.status === 'error' && entry.http === 404) entry.keyHint = notFoundHint(d.conn);
   delete entry.text; delete entry.aborted;
   S.lastGen = entry;
   loadGenLog().then((log) => {
@@ -3176,7 +3188,8 @@ function renderSettingsView(open) {
           ${TEXT_SERVERS.map(([n, u], i) => `<option value="${i}">${esc(n)} (${esc(u)})</option>`).join('')}
         </select><span class="hint">Your phone needs an <b>https</b> address that reaches the server (a tunnel such as KoboldCpp's Remote Tunnel or Cloudflare Tunnel), and the server must allow browser (CORS) requests.</span></label>` : ''}
       ${PROVIDERS[conn.provider].needsUrl ? settingsField('Base URL', 'conn.baseUrl', 'url', 'placeholder="https://api.example.com/v1"', conn.provider === 'textcomp' ? 'Ends in /v1 (we add /completions).' : 'The URL that ends in /v1 (we add /chat/completions). Must be https and allow browser (CORS) requests.') : ''}
-      <label class="field"><span class="label">API key${conn.provider === 'openrouter' ? '<span class="hint">Get one at openrouter.ai/keys</span>' : conn.provider === 'anthropic' ? '<span class="hint">Get one at console.anthropic.com</span>' : ''}</span>
+      ${conn.provider === 'anthropic' ? settingsField('Reverse proxy (optional)', 'conn.proxyUrl', 'url', 'placeholder="https://example.org/anthropic/v1"', 'Leave empty to use Anthropic directly. For a Claude proxy, paste its address here and the proxy\'s password or key in API key (like SillyTavern\'s Reverse Proxy). The proxy must allow browser (CORS) requests.') : ''}
+      <label class="field"><span class="label">API key${conn.provider === 'openrouter' ? '<span class="hint">Get one at openrouter.ai/keys</span>' : conn.provider === 'anthropic' ? `<span class="hint">${conn.proxyUrl ? 'The proxy\'s password or key' : 'Get one at console.anthropic.com'}</span>` : ''}</span>
         <span class="row"><input type="password" data-bind="conn.apiKey" data-secret id="api-key" placeholder="${esc(secretHint(conn.apiKey, 'sk-…'))}" autocomplete="off" autocapitalize="off" spellcheck="false">${conn.apiKey ? `<button class="btn sm" data-action="secret-clear" data-path="conn.apiKey">Remove</button>` : ''}</span></label>
       <div class="field"><span class="label">Model</span>
         <div class="row"><input data-bind="conn.model" value="${esc(conn.model)}" placeholder="${conn.provider === 'anthropic' ? 'claude-opus-5-5' : conn.provider === 'openrouter' ? 'anthropic/claude-opus-5.5' : 'model id'}" autocomplete="off" autocapitalize="off" spellcheck="false">
@@ -3583,7 +3596,8 @@ async function testConnection() {
     toast(`Connected ✓ ${text ? '— model said: ' + text.trim().slice(0, 60) : ''}`, 4000);
   } catch (e) {
     if (!/Network error/.test(e.message)) {
-      const hint = (e.status === 401 || /401|invalid.*key|unauthori[sz]ed/i.test(e.message)) ? keyMismatchHint(conn) : '';
+      const hint = (e.status === 401 || /401|invalid.*key|unauthori[sz]ed/i.test(e.message)) ? keyMismatchHint(conn)
+        : (e.status === 404 || /HTTP 404/.test(e.message)) ? notFoundHint(conn) : '';
       toast(hint ? `${e.message} — ${hint}` : e.message, hint ? 14000 : 8000);
       return;
     }
