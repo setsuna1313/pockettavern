@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.5';
+const VERSION = '1.10.6';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1556,7 +1556,7 @@ function genExplain(x) {
   if (x.status === 'empty') return [`The model finished without writing anything${x.finish ? ` (finish reason: ${x.finish}${x.nativeFinish && x.nativeFinish !== x.finish ? ` / ${x.nativeFinish}` : ''})` : ''}.`, 'Usually a temporary hiccup at the provider — swipe to retry. If it keeps happening with one model, its provider may be quietly filtering the request; try another model or provider.'];
   if (x.status === 'error') {
     if (/could not reach|Failed to fetch|NetworkError|Load failed/i.test(msg)) return ['Your phone could not reach the server.', 'Check your connection, VPN, ad blocker or DNS filter, then try again.'];
-    if (http === 401 || /invalid.*key|no auth|unauthori[sz]ed/i.test(msg)) return ['The API key was rejected.', 'Paste the key again in Settings → API connection (it may have been deleted or mistyped).'];
+    if (http === 401 || /invalid.*key|no auth|unauthori[sz]ed/i.test(msg)) return ['The API key was rejected.', x.keyHint || 'Paste the key again in Settings → API connection (it may have been deleted or mistyped).'];
     if (http === 402 || /credit|insufficient|payment|balance/i.test(msg)) return ['Out of credits (or a spending limit was reached).', 'Add credit or raise the key\'s limit on the provider\'s website.'];
     if (http === 429 || /rate.?limit|too many requests|quota/i.test(msg)) return ['Rate-limited: too many requests, or the free tier quota ran out.', 'Wait a minute and try again, or use a paid model/provider.'];
     if (/context|too long|maximum.*tokens|token limit|prompt is too long/i.test(msg)) return ['The prompt was too long for this model.', 'Lower Context size in Settings → Generation, or turn off big lorebooks / prompts.'];
@@ -1567,6 +1567,36 @@ function genExplain(x) {
     return ['The request failed.', 'See the full message below.'];
   }
   return ['Worked.', ''];
+}
+
+// Which service a key belongs to, from its prefix (keys are never shown, only checked).
+const KEY_KINDS = [
+  [/^sk-or-/i, 'openrouter', 'an OpenRouter key'],
+  [/^sk-ant-/i, 'anthropic', 'an Anthropic (Claude) key'],
+  [/^AIza/, 'google', 'a Google (Gemini / AI Studio) key'],
+  [/^sk-(proj-)?[A-Za-z0-9_-]{20,}/, 'openai', 'an OpenAI-style key'],
+];
+const keyKind = (key) => { const k = String(key || '').trim(); const m = KEY_KINDS.find(([rx]) => rx.test(k)); return m ? { id: m[1], label: m[2] } : null; };
+/** A plain hint when the saved key clearly belongs to a different provider than the one selected. */
+function keyMismatchHint(conn) {
+  if (!conn || !conn.apiKey) return '';
+  const kind = keyKind(conn.apiKey);
+  if (!kind) return '';
+  if (conn.provider === 'anthropic' && kind.id !== 'anthropic') {
+    return kind.id === 'openrouter'
+      ? 'This is an OpenRouter key, but the provider is set to Claude (Anthropic). Set Provider to OpenRouter and use a model like anthropic/claude-opus-4.6 — or paste a key from console.anthropic.com (starts with sk-ant-).'
+      : `This looks like ${kind.label}, but Claude (Anthropic) only accepts keys from console.anthropic.com (they start with sk-ant-). Paste an Anthropic key, or switch Provider to the service this key is from.`;
+  }
+  if (conn.provider === 'openrouter' && kind.id !== 'openrouter') {
+    return `This looks like ${kind.label}, but the provider is set to OpenRouter, which needs a key from openrouter.ai/keys (starts with sk-or-).${kind.id === 'anthropic' ? ' Or set Provider to Claude (Anthropic) to use this key directly.' : ''}`;
+  }
+  if (conn.provider === 'openai' && kind.id === 'openrouter' && !/openrouter/i.test(conn.baseUrl || '')) {
+    return 'This is an OpenRouter key, but the connection points somewhere else. Set Provider to OpenRouter.';
+  }
+  if (conn.provider === 'openai' && kind.id === 'anthropic') {
+    return 'This is an Anthropic key. Set Provider to Claude (Anthropic) to use it.';
+  }
+  return '';
 }
 
 function recordGeneration(d) {
@@ -1580,6 +1610,7 @@ function recordGeneration(d) {
     aborted: d.aborted, text: d.text,
   };
   entry.status = genStatus(entry);
+  if (entry.status === 'error' && (entry.http === 401 || /invalid.*key|unauthori[sz]ed/i.test(entry.error))) entry.keyHint = keyMismatchHint(d.conn);
   delete entry.text; delete entry.aborted;
   S.lastGen = entry;
   loadGenLog().then((log) => {
@@ -3551,7 +3582,11 @@ async function testConnection() {
     ], { textFormat: isTextConn(conn) ? textFormatter('quiet') : null, purpose: 'test' });
     toast(`Connected ✓ ${text ? '— model said: ' + text.trim().slice(0, 60) : ''}`, 4000);
   } catch (e) {
-    if (!/Network error/.test(e.message)) { toast(e.message, 8000); return; }
+    if (!/Network error/.test(e.message)) {
+      const hint = (e.status === 401 || /401|invalid.*key|unauthori[sz]ed/i.test(e.message)) ? keyMismatchHint(conn) : '';
+      toast(hint ? `${e.message} — ${hint}` : e.message, hint ? 14000 : 8000);
+      return;
+    }
     toast('Checking the connection…', 10000);
     const why = await diagnose(conn);
     openSheet(`<div class="sheet-title">Connection problem</div><p class="error">${esc(e.message)}</p><p>${esc(why)}</p>
