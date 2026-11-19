@@ -4,6 +4,7 @@ export const PROVIDERS = {
   openrouter: { label: 'OpenRouter', base: 'https://openrouter.ai/api/v1', kind: 'openai', needsUrl: false },
   openai: { label: 'OpenAI-compatible', base: 'https://api.openai.com/v1', kind: 'openai', needsUrl: true },
   anthropic: { label: 'Claude (Anthropic)', base: 'https://api.anthropic.com/v1', kind: 'anthropic', needsUrl: false },
+  chutes: { label: 'Chutes', base: 'https://llm.chutes.ai/v1', kind: 'openai', needsUrl: false },
   textcomp: { label: 'Text completion (KoboldCpp, Ollama, LM Studio, ooba…)', base: 'http://localhost:5001/v1', kind: 'text', needsUrl: true },
 };
 
@@ -169,7 +170,7 @@ export async function listModels(conn) {
   return arr.map((m) => {
     const id = m.id || m.name;
     let price = '';
-    if (m.pricing && m.pricing.prompt != null) {
+    if (conn.provider === 'openrouter' && m.pricing && m.pricing.prompt != null) { // prices are per token on OpenRouter; other APIs use other units
       const inp = parseFloat(m.pricing.prompt) * 1e6;
       const out = parseFloat(m.pricing.completion) * 1e6;
       price = (inp === 0 && out === 0) ? 'free' : `$${+inp.toFixed(2)}/$${+out.toFixed(2)} per M`;
@@ -180,8 +181,8 @@ export async function listModels(conn) {
       ctx: m.context_length || m.max_input_tokens || null,
       price,
       // US dollars per token, when the API publishes prices (OpenRouter does).
-      inPrice: m.pricing && m.pricing.prompt != null ? parseFloat(m.pricing.prompt) || 0 : null,
-      outPrice: m.pricing && m.pricing.completion != null ? parseFloat(m.pricing.completion) || 0 : null,
+      inPrice: conn.provider === 'openrouter' && m.pricing && m.pricing.prompt != null ? parseFloat(m.pricing.prompt) || 0 : null,
+      outPrice: conn.provider === 'openrouter' && m.pricing && m.pricing.completion != null ? parseFloat(m.pricing.completion) || 0 : null,
     };
   }).filter((m) => m.id);
 }

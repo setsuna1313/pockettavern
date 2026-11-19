@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.9';
+const VERSION = '1.11.0';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1607,6 +1607,7 @@ function genExplain(x) {
 // Which service a key belongs to, from its prefix (keys are never shown, only checked).
 const KEY_KINDS = [
   [/^sk-or-/i, 'openrouter', 'an OpenRouter key'],
+  [/^cpk_/i, 'chutes', 'a Chutes key'],
   [/^sk-ant-/i, 'anthropic', 'an Anthropic (Claude) key'],
   [/^AIza/, 'google', 'a Google (Gemini / AI Studio) key'],
   [/^sk-(proj-)?[A-Za-z0-9_-]{20,}/, 'openai', 'an OpenAI-style key'],
@@ -1628,6 +1629,12 @@ function keyMismatchHint(conn) {
   }
   if (conn.provider === 'openai' && kind.id === 'openrouter' && !/openrouter/i.test(conn.baseUrl || '')) {
     return 'This is an OpenRouter key, but the connection points somewhere else. Set Provider to OpenRouter.';
+  }
+  if (conn.provider === 'chutes' && kind.id !== 'chutes') {
+    return `This looks like ${kind.label}, but the provider is set to Chutes, which needs a key from chutes.ai (API keys page; starts with cpk_).`;
+  }
+  if (kind.id === 'chutes' && conn.provider !== 'chutes') {
+    return 'This is a Chutes key. Set Provider to Chutes to use it.';
   }
   if (conn.provider === 'openai' && kind.id === 'anthropic') {
     return 'This is an Anthropic key. Set Provider to Claude (Anthropic) to use it.';
@@ -3224,10 +3231,10 @@ function renderSettingsView(open) {
         </select><span class="hint">Your phone needs an <b>https</b> address that reaches the server (a tunnel such as KoboldCpp's Remote Tunnel or Cloudflare Tunnel), and the server must allow browser (CORS) requests.</span></label>` : ''}
       ${PROVIDERS[conn.provider].needsUrl ? settingsField('Base URL', 'conn.baseUrl', 'url', 'placeholder="https://api.example.com/v1"', conn.provider === 'textcomp' ? 'Ends in /v1 (we add /completions).' : 'The URL that ends in /v1 (we add /chat/completions). Must be https and allow browser (CORS) requests.') : ''}
       ${conn.provider === 'anthropic' ? settingsField('Reverse proxy (optional)', 'conn.proxyUrl', 'url', 'placeholder="https://example.org/anthropic/v1"', 'Leave empty to use Anthropic directly. For a Claude proxy, paste its address here and the proxy\'s password or key in API key (like SillyTavern\'s Reverse Proxy). The proxy must allow browser (CORS) requests.') : ''}
-      <label class="field"><span class="label">API key${conn.provider === 'openrouter' ? '<span class="hint">Get one at openrouter.ai/keys</span>' : conn.provider === 'anthropic' ? `<span class="hint">${conn.proxyUrl ? 'The proxy\'s password or key' : 'Get one at console.anthropic.com'}</span>` : ''}</span>
+      <label class="field"><span class="label">API key${conn.provider === 'openrouter' ? '<span class="hint">Get one at openrouter.ai/keys</span>' : conn.provider === 'chutes' ? '<span class="hint">Get one at chutes.ai (API keys)</span>' : conn.provider === 'anthropic' ? `<span class="hint">${conn.proxyUrl ? 'The proxy\'s password or key' : 'Get one at console.anthropic.com'}</span>` : ''}</span>
         <span class="row"><input type="password" data-bind="conn.apiKey" data-secret id="api-key" placeholder="${esc(secretHint(conn.apiKey, 'sk-…'))}" autocomplete="off" autocapitalize="off" spellcheck="false">${conn.apiKey ? `<button class="btn sm" data-action="secret-clear" data-path="conn.apiKey">Remove</button>` : ''}</span></label>
       <div class="field"><span class="label">Model</span>
-        <div class="row"><input data-bind="conn.model" value="${esc(conn.model)}" placeholder="${conn.provider === 'anthropic' ? 'claude-opus-5-5' : conn.provider === 'openrouter' ? 'anthropic/claude-opus-5.5' : 'model id'}" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <div class="row"><input data-bind="conn.model" value="${esc(conn.model)}" placeholder="${conn.provider === 'anthropic' ? 'claude-opus-5-5' : conn.provider === 'openrouter' ? 'anthropic/claude-opus-5.5' : conn.provider === 'chutes' ? 'deepseek-ai/DeepSeek-V3-0324' : 'model id'}" autocomplete="off" autocapitalize="off" spellcheck="false">
         <button class="btn" data-action="browse-models">Browse</button></div></div>
       <div class="row wrap">
         <button class="btn primary" data-action="test-conn">Test connection</button>
