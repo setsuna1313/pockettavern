@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.7';
+const VERSION = '1.10.8';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1282,7 +1282,7 @@ async function renderHome() {
       ${!all.length ? `
         <div class="empty">
           <p>No characters yet.</p>
-          <p class="muted">Import SillyTavern / TavernAI cards (PNG or JSON), paste a chub.ai link, or create your own.</p>
+          <p class="muted">Import SillyTavern / TavernAI cards (PNG or JSON), paste a chub.ai or JanitorAI link, or create your own.</p>
           <div class="row center">
             <button class="btn primary" data-action="import-files">Import card</button>
             <button class="btn" data-action="link-import">From a link</button>
@@ -1418,12 +1418,47 @@ async function cardFromChub(path) {
     : `Couldn't get that character from chub.ai (${errors.join('; ')}).`);
 }
 
+/** The character ID in a JanitorAI or JannyAI character link. */
+function janitorId(input) {
+  const m = String(input || '').match(/(?:janitorai\.com|jannyai\.com)\/characters\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * JanitorAI has no public download, so (like SillyTavern) cards come from JannyAI,
+ * which mirrors JanitorAI characters whose definitions are public.
+ */
+async function cardFromJanny(id) {
+  const blocked = "JannyAI didn't allow the download from inside the app. Open the character on jannyai.com (search for its name), tap Download, then import the PNG with the import button.";
+  let r;
+  try {
+    r = await fetch('https://api.jannyai.com/api/v1/download', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ characterId: id }) });
+  } catch { throw new Error(blocked); }
+  let j = null;
+  try { j = await r.json(); } catch { /* not JSON */ }
+  if (!r.ok || !j || j.status !== 'ok' || !j.downloadUrl) {
+    throw new Error('This character isn\'t available from JannyAI. Usually that means its definition is hidden on JanitorAI, so it can\'t be downloaded anywhere — only bots with a public definition can be imported.');
+  }
+  let img;
+  try { img = await fetch(j.downloadUrl); } catch { throw new Error(blocked); }
+  if (!img.ok) throw new Error(`Downloading the card failed (HTTP ${img.status}).`);
+  const blob = await img.blob();
+  return parseCardFile(new File([blob], 'janitor.png', { type: blob.type || 'image/png' }));
+}
+
 async function importFromLink(link) {
   const t = String(link || '').trim();
   let res;
   let base;
   const path = chubPath(t);
-  if (path) {
+  const jid = janitorId(t);
+  if (jid) {
+    toast('Downloading from JanitorAI (via JannyAI)…', 20000);
+    res = await cardFromJanny(jid);
+    base = (t.split(/[?#]/)[0].match(/characters\/[0-9a-f-]{36}_?(?:character-)?([^/]*)/i) || [])[1] || `janitor-${jid.slice(0, 8)}`;
+  } else if (/janitorai\.com|jannyai\.com/i.test(t)) {
+    throw new Error('Paste the link to a character page — it looks like https://janitorai.com/characters/…');
+  } else if (path) {
     toast('Downloading from chub.ai…', 20000);
     res = await cardFromChub(path);
     base = path.split('/')[1];
@@ -1436,7 +1471,7 @@ async function importFromLink(link) {
     base = decodeURIComponent(t.split(/[?#]/)[0].split('/').pop() || 'card').replace(/\.[^.]+$/, '');
     res = await parseCardFile(new File([blob], `${base}.${/png/.test(blob.type) ? 'png' : 'json'}`, { type: blob.type }));
   } else {
-    throw new Error('Paste a chub.ai character link (or creator/name), or a direct https link to a card PNG/JSON.');
+    throw new Error('Paste a chub.ai or JanitorAI character link (or chub creator/name), or a direct https link to a card PNG/JSON.');
   }
   const now = Date.now();
   const c = { id: db.uid(), ...res.card, fileName: base, avatar: res.avatarBlob ? await blobToAvatar(res.avatarBlob) : null, createdAt: now, updatedAt: now, source: t };
@@ -4175,8 +4210,8 @@ const actions = {
   },
   'search-open': (el) => { S.jumpTo = { chatId: el.dataset.chat, msgId: el.dataset.msg }; go(`#/chat/${el.dataset.char}/${el.dataset.chat}`); },
   'link-import': () => openSheet(`<div class="sheet-title">Import from a link</div>
-    <label class="field"><span class="label">chub.ai character link</span><input id="link-url" placeholder="https://chub.ai/characters/creator/name" autocapitalize="off" spellcheck="false"></label>
-    <p class="hint">Also works with “creator/name”, or a direct https link to a card PNG/JSON.</p>
+    <label class="field"><span class="label">chub.ai or JanitorAI character link</span><input id="link-url" placeholder="https://chub.ai/characters/creator/name" autocapitalize="off" spellcheck="false"></label>
+    <p class="hint">Also works with JannyAI links, chub “creator/name”, or a direct https link to a card PNG/JSON. JanitorAI bots with a hidden definition can't be imported.</p>
     <button class="btn primary block" data-action="link-go">Import</button>`),
   'link-go': async () => {
     try { await importFromLink(($('#link-url') || {}).value); } catch (e) { toast(e.message, 8000); }
