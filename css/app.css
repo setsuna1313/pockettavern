@@ -535,3 +535,6 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 18px 0 6px; }
 .ge-main .hint { font-size: .78rem; overflow-wrap: anywhere; }
 .ge-why { font-size: .82rem; margin-top: 2px; }
 .ge-detail { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; background: var(--bg3); border-radius: 8px; padding: 8px; margin: 8px 0; user-select: text; -webkit-user-select: text; }
+
+.steps-list { margin: 8px 0 14px; padding-left: 1.3em; display: grid; gap: 6px; }
+.sheet a.btn.block { display: flex; justify-content: center; text-decoration: none; margin-bottom: 8px; }

@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.10.8';
+const VERSION = '1.10.9';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1429,18 +1429,18 @@ function janitorId(input) {
  * which mirrors JanitorAI characters whose definitions are public.
  */
 async function cardFromJanny(id) {
-  const blocked = "JannyAI didn't allow the download from inside the app. Open the character on jannyai.com (search for its name), tap Download, then import the PNG with the import button.";
+  const blocked = Object.assign(new Error("JannyAI doesn't allow downloads from inside the app."), { jannyBlocked: true });
   let r;
   try {
     r = await fetch('https://api.jannyai.com/api/v1/download', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ characterId: id }) });
-  } catch { throw new Error(blocked); }
+  } catch { throw blocked; }
   let j = null;
   try { j = await r.json(); } catch { /* not JSON */ }
   if (!r.ok || !j || j.status !== 'ok' || !j.downloadUrl) {
     throw new Error('This character isn\'t available from JannyAI. Usually that means its definition is hidden on JanitorAI, so it can\'t be downloaded anywhere — only bots with a public definition can be imported.');
   }
   let img;
-  try { img = await fetch(j.downloadUrl); } catch { throw new Error(blocked); }
+  try { img = await fetch(j.downloadUrl); } catch { throw blocked; }
   if (!img.ok) throw new Error(`Downloading the card failed (HTTP ${img.status}).`);
   const blob = await img.blob();
   return parseCardFile(new File([blob], 'janitor.png', { type: blob.type || 'image/png' }));
@@ -4214,7 +4214,23 @@ const actions = {
     <p class="hint">Also works with JannyAI links, chub “creator/name”, or a direct https link to a card PNG/JSON. JanitorAI bots with a hidden definition can't be imported.</p>
     <button class="btn primary block" data-action="link-go">Import</button>`),
   'link-go': async () => {
-    try { await importFromLink(($('#link-url') || {}).value); } catch (e) { toast(e.message, 8000); }
+    const link = ($('#link-url') || {}).value;
+    try { await importFromLink(link); } catch (e) {
+      if (!e.jannyBlocked) { toast(e.message, 8000); return; }
+      // JannyAI blocks apps from downloading: send them to the page to download it themselves.
+      const m = String(link).trim().split(/[?#]/)[0].match(/characters\/([^/]+)/i);
+      const page = `https://jannyai.com/characters/${m ? m[1] : janitorId(link)}`;
+      $('#toast').classList.remove('show');
+      openSheet(`<div class="sheet-title">Download it from JannyAI</div>
+        <p>JannyAI doesn't let apps download characters directly, so this one takes two steps:</p>
+        <ol class="steps-list">
+          <li>Tap <b>Open on JannyAI</b>, then tap <b>Download</b> on that page and save the PNG (Save to Files / Downloads).</li>
+          <li>Come back here and tap <b>Import the PNG</b>.</li>
+        </ol>
+        <a class="btn primary block" href="${esc(page)}" target="_blank" rel="noopener">Open on JannyAI</a>
+        <button class="btn block" data-action="import-files">${ICONS.import} Import the PNG</button>
+        <p class="hint">If JannyAI says the character isn't there, its definition is hidden on JanitorAI and it can't be downloaded anywhere.</p>`);
+    }
   },
   'st-button': (el) => { const r = S.buttonResolve; S.buttonResolve = null; closeSheet(); if (r) r(+el.dataset.i); },
   'ins-copy': () => {
