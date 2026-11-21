@@ -16,7 +16,7 @@ import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
 
-const VERSION = '1.11.0';
+const VERSION = '1.11.1';
 const DEFAULT_MAIN = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}. Write one reply only, in an immersive roleplay style. Stay in character. Never write {{user}}'s dialogue or actions.";
 
 function defaultSettings() {
@@ -1495,7 +1495,7 @@ async function personasFromFile(f) {
   const buf = await f.arrayBuffer();
   if (isPng(buf)) {
     const { card, avatarBlob } = await parseCardFile(new File([buf], f.name, { type: 'image/png' }));
-    return [{ name: card.name, description: card.description || '', avatar: avatarBlob ? await blobToAvatar(avatarBlob, 256) : null }];
+    return [{ name: card.name, description: card.description || '', avatar: avatarBlob ? await blobToAvatar(avatarBlob, 512) : null }];
   }
   let j;
   try { j = JSON.parse(new TextDecoder().decode(buf)); } catch { throw new Error(`${f.name}: not a persona, card or JSON file`); }
@@ -2055,7 +2055,7 @@ async function importStZip(file) {
         const d = pDescs[f] || {};
         const p = { id: db.uid(), name, description: String(d.description || ''), avatar: null };
         const ae = avatarEntry.get(f);
-        if (ae) { try { p.avatar = await blobToAvatar(await readEntry(file, ae), 256); } catch { /* skip avatar */ } }
+        if (ae) { try { p.avatar = await blobToAvatar(await readEntry(file, ae), 512); } catch { /* skip avatar */ } }
         if (d.lorebook) { const b = bookByName.get(String(d.lorebook).toLowerCase()); if (b) p.lorebooks = [b.id]; }
         for (const link of Array.isArray(d.connections) ? d.connections : []) {
           if (link && link.type === 'character') {
@@ -4741,7 +4741,7 @@ const actions = {
   'persona-avatar': async () => {
     const [f] = await pickFile('file-avatar');
     if (!f) return;
-    activePersona().avatar = await blobToAvatar(f, 256);
+    activePersona().avatar = await blobToAvatar(f, 512);
     saveSettings();
     rerenderSettings();
   },

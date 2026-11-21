@@ -189,23 +189,54 @@ function loadImage(src) {
 }
 
 /** Resize an image Blob to a compact JPEG data URL for storage/display. */
-export async function blobToAvatar(blob, max = 768) {
+/**
+ * A picture as a data: URL for storage. Small enough pictures are kept exactly as they
+ * are; bigger ones are shrunk in halves with high-quality smoothing (one big jump makes
+ * detailed art soft) and saved as a high-quality JPEG.
+ */
+export async function blobToAvatar(blob, max = 1280) {
   const url = URL.createObjectURL(blob);
   try {
     const img = await loadImage(url);
-    const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-    const w = Math.round(img.naturalWidth * scale);
-    const h = Math.round(img.naturalHeight * scale);
+    const longest = Math.max(img.naturalWidth, img.naturalHeight);
+    if (longest <= max && blob.size <= 1.5e6 && /^image\/(jpeg|png|webp)$/i.test(blob.type || '')) {
+      return await blobToDataUrlLocal(blob);
+    }
+    const scale = Math.min(1, max / longest);
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    // Halve until within 2× of the target, then one last high-quality step.
+    let src = img;
+    let sw = img.naturalWidth;
+    let sh = img.naturalHeight;
+    while (sw / 2 >= w * 1.0001 && sh / 2 >= h * 1.0001) {
+      const c = document.createElement('canvas');
+      c.width = Math.round(sw / 2); c.height = Math.round(sh / 2);
+      const cx = c.getContext('2d');
+      cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+      cx.drawImage(src, 0, 0, c.width, c.height);
+      src = c; sw = c.width; sh = c.height;
+    }
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.fillStyle = '#222';
     ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(img, 0, 0, w, h);
-    return canvas.toDataURL('image/jpeg', 0.88);
+    ctx.drawImage(src, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.92);
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+function blobToDataUrlLocal(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
 }
 
 async function avatarPng(char) {
