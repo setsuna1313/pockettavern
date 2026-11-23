@@ -11,7 +11,7 @@ import { applyRegex, parseRegexFile, normalizeScript, runScript as runRegexScrip
 import { importSTPreset, exportSTPreset, isSTPreset, MARKER_LABELS, AUTO_SLOTS } from './preset.js';
 import { formatMessage, renderInto, setThemeShadowCss, setExternalMedia } from './render.js';
 import { runScript, COMMANDS } from './stscript.js';
-import { DEFAULT_ENHANCE_SETTINGS, ENHANCE_TOGGLES, buildEnhancementPrompt, migrateEnhanceSettings, normalizeGeneratedText, DEFAULT_SUMMARIZE_SETTINGS } from './enhance.js';
+import { DEFAULT_ENHANCE_SETTINGS, ENHANCE_TOGGLES, buildEnhancementPrompt, buildRawEnhancement, migrateEnhanceSettings, normalizeGeneratedText, DEFAULT_SUMMARIZE_SETTINGS } from './enhance.js';
 import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
@@ -674,6 +674,34 @@ async function quietGenerate(quietPrompt, { onToken, maxTokens, signal, chat = S
   return generate(conn, preset, messages, { signal, onToken, ...genOptions('quiet') });
 }
 
+/**
+ * Enhance without the preset: the preset's own rules ("never write {{user}}", mandatory
+ * info boards, addon blocks) otherwise override the request, so models either refuse or
+ * write {{char}}'s next turn instead.
+ */
+async function rawEnhance(chat, draft, cfg, signal) {
+  const conn = activeConn();
+  if (!connReady(conn)) throw new Error('Set up an API connection first (Settings → Connection).');
+  const persona = activePersona();
+  const user = persona.name || 'User';
+  const inGroup = S.group && chat.groupId === S.group.id;
+  const charName = inGroup ? activeMembers().map((m) => m.name).join(', ') : ((S.char || {}).name || 'Character');
+  const env = { char: charName, user, vars: { ...(chat.vars || {}) } };
+  const history = chat.messages.filter((m) => !m.hidden).slice(-12).map((m) => {
+    const speaker = m.role === 'assistant' ? (speakerOf(m) || S.char) : S.char;
+    const text = plainForSummary(evaluateMacros(m.swipes ? m.swipes[m.swipeIdx] : m.text, { ...env, char: speaker ? speaker.name : charName }));
+    return { name: memNameOf(m), text };
+  }).filter((h) => h.text);
+  const { system, user: body } = buildRawEnhancement({
+    draft, settings: cfg, charName, userName: user, history,
+    charDescription: inGroup ? '' : plainForSummary(evaluateMacros((S.char || {}).description || '', env)),
+    personaDescription: plainForSummary(evaluateMacros(persona.description || '', env)),
+  });
+  const preset = { ...S.settings.preset, stream: false, max_tokens: Math.max(Number(S.settings.preset.max_tokens) || 0, 1200) };
+  return generate(conn, preset, [{ role: 'system', content: evaluateMacros(system, env) }, { role: 'user', content: evaluateMacros(body, env) }],
+    { signal, textFormat: isTextConn(conn) ? textFormatter('quiet') : null, purpose: 'enhance' });
+}
+
 // ---------- Enhance My Reply ----------
 async function enhanceDraft() {
   if (S.generating) return;
@@ -687,7 +715,10 @@ async function enhanceDraft() {
   const btn = $('#enh-btn');
   if (btn) btn.classList.add('busy');
   try {
-    const out = normalizeGeneratedText(await quietGenerate(buildEnhancementPrompt(draft, S.settings.ext.enhance), { signal: S.abort.signal }));
+    const cfg = S.settings.ext.enhance;
+    const out = normalizeGeneratedText(cfg.mode === 'classic'
+      ? await quietGenerate(buildEnhancementPrompt(draft, cfg), { signal: S.abort.signal })
+      : await rawEnhance(chat, draft, cfg, S.abort.signal));
     if (!out) throw new Error('The model returned an empty reply.');
     S.enhanceOriginal = { chatId: chat.id, text: draft };
     if (S.chat === chat) { input.value = out; setDraft(chat.id, out); autosize(input); updateEnhanceButton(); }
@@ -1564,7 +1595,7 @@ async function exportPersona() {
 // back empty. Never stores API keys or chat text.
 const GEN_LOG_MAX = 60;
 let genLog = null;
-const PURPOSE_LABEL = { summary: 'Summary', reply: 'Reply', continue: 'Continue', impersonate: 'Impersonate', quiet: 'Background task', memory: 'Memory / summary', script: 'Script', test: 'Connection test', background: 'Background task' };
+const PURPOSE_LABEL = { summary: 'Summary', reply: 'Reply', continue: 'Continue', impersonate: 'Impersonate', quiet: 'Background task', enhance: 'Enhance reply', memory: 'Memory / summary', script: 'Script', test: 'Connection test', background: 'Background task' };
 
 async function loadGenLog() {
   if (!genLog) { try { genLog = (await db.get('kv', 'gen-log')) || []; } catch { genLog = []; } }
@@ -3416,8 +3447,11 @@ function renderSettingsView(open) {
     ${tog('data-ext-enhance-toggle', 'enabled', en.enabled, 'Enabled', 'Shows ✨ next to the message box when you have a draft')}
     <label class="field"><span class="label">Enhancement prompt</span><textarea autocomplete="off" data-ext-enhance="prompt" rows="6">${esc(en.prompt)}</textarea></label>
     <button class="btn sm" data-action="enhance-reset">Reset prompt</button>
+    <label class="field inline"><span class="label">Prompt builder</span><select data-ext-enhance-select="mode">
+      ${[['raw', 'Raw — enhance prompt + recent chat only'], ['classic', 'Classic — through your preset']].map(([k, v]) => `<option value="${k}" ${(en.mode === 'classic' ? 'classic' : 'raw') === k ? 'selected' : ''}>${v}</option>`).join('')}
+    </select></label>
     ${ENHANCE_TOGGLES.map(([k, label, hint]) => tog('data-ext-enhance-toggle', k, en[k], label, hint)).join('')}
-    <p class="hint">Uses the chat context plus your current connection, model, preset and generation settings. The result replaces your draft but isn't sent.</p>
+    <p class="hint">Raw sends only the enhance instructions, short notes on both characters and the recent chat, so preset rules (info boards, “never write for {{user}}”) can't take over. Classic sends it through your full preset. Both use your current connection and model. The result replaces your draft but isn't sent.</p>
     <h4 class="sub">📝 Summarize</h4>
     ${tog('data-ext-sum-toggle', 'enabled', sm.enabled, 'Enabled', 'Keeps a running summary of each chat and adds it to the prompt')}
     <label class="field inline"><span class="label">Update every<span class="hint">messages</span></span><input inputmode="numeric" data-ext-sum="every" value="${sm.every}"></label>
@@ -4964,6 +4998,11 @@ document.addEventListener('change', (e) => {
   }
   if (el.dataset.extSumToggle) {
     S.settings.ext.summarize[el.dataset.extSumToggle] = el.checked;
+    saveSettings();
+    return;
+  }
+  if (el.dataset.extEnhanceSelect) {
+    S.settings.ext.enhance[el.dataset.extEnhanceSelect] = el.value;
     saveSettings();
     return;
   }
