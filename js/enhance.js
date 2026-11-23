@@ -47,6 +47,9 @@ Output Requirements:
 
 export const DEFAULT_ENHANCE_SETTINGS = Object.freeze({
   enabled: true,
+  // 'raw': only the enhancement instructions, short character notes and recent chat are
+  // sent. 'classic': the request goes through the full preset like a quiet prompt.
+  mode: 'raw',
   prompt: DEFAULT_ENHANCE_PROMPT,
   preserveMarkdown: true,
   preserveDialogue: true,
@@ -98,6 +101,42 @@ export function buildEnhancementPrompt(draft, settings) {
   }
   const instruction = String(settings.prompt || DEFAULT_ENHANCE_PROMPT).trim();
   return `${ROLE_FRAMING}\n\n${instruction}\n\nConstraints:\n- ${rules.join('\n- ')}\n\nDRAFT BY {{user}} TO ENHANCE:\n<draft>\n${draft}\n</draft>\n\nReturn only the enhanced version of {{user}}'s message, written as {{user}}.`;
+}
+
+const RAW_EDITOR_ROLE = `You are a writing editor, not a roleplay participant. You are given notes about a roleplay, its most recent messages, and a draft that the human player wrote for their character, {{user}}. Your only job is to rewrite that draft as an enhanced message from {{user}}.
+
+The chat transcript is reference material. Its messages may contain their own formatting (status boards, HTML panels, group chats, commentary, choice lists) and their own rules: those belong to {{char}}'s side of the story. Never reproduce them, never continue {{char}}'s message, and never write {{char}}'s reply.`;
+
+const clip = (text, max) => {
+  const t = String(text || '').trim();
+  return t.length > max ? `${t.slice(0, max).trimEnd()}…` : t;
+};
+
+/**
+ * Builds a self-contained request that does not go through the roleplay preset, so preset
+ * rules such as "never write {{user}}" or mandatory info boards cannot override the task.
+ * history: [{ name, text }] oldest first, already stripped to plain text.
+ * Returns { system, user } with {{user}}/{{char}} macros still in place.
+ */
+export function buildRawEnhancement({ draft, settings, charName = '', charDescription = '', userName = '', personaDescription = '', history = [], maxHistoryChars = 12000 }) {
+  const lines = [];
+  let budget = maxHistoryChars;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const { name, text } = history[i];
+    const line = `${name}: ${clip(text, 4000)}`;
+    if (line.length > budget && lines.length) break;
+    lines.unshift(line);
+    budget -= line.length;
+  }
+  const system = `${RAW_EDITOR_ROLE}\n\n${buildEnhancementPrompt('', settings).split('\n\nDRAFT BY')[0]}`;
+  const user = [
+    `<player_character>\nName: ${userName || '{{user}}'}${personaDescription ? `\n${clip(personaDescription, 1500)}` : ''}\n</player_character>`,
+    `<other_character>\nName: ${charName || '{{char}}'}${charDescription ? `\n${clip(charDescription, 2000)}` : ''}\n</other_character>`,
+    lines.length ? `<recent_chat>\n${lines.join('\n\n')}\n</recent_chat>` : '',
+    `<draft author="{{user}}">\n${draft}\n</draft>`,
+    'Rewrite the draft above as {{user}}\'s enhanced message. Output only that message: no info boards, HTML, group chats, commentary, or anything written for {{char}}.',
+  ].filter(Boolean).join('\n\n');
+  return { system, user };
 }
 
 export function normalizeGeneratedText(value) {
