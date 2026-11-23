@@ -11,7 +11,7 @@ import { applyRegex, parseRegexFile, normalizeScript, runScript as runRegexScrip
 import { importSTPreset, exportSTPreset, isSTPreset, MARKER_LABELS, AUTO_SLOTS } from './preset.js';
 import { formatMessage, renderInto, setThemeShadowCss, setExternalMedia } from './render.js';
 import { runScript, COMMANDS } from './stscript.js';
-import { DEFAULT_ENHANCE_SETTINGS, ENHANCE_TOGGLES, buildEnhancementPrompt, normalizeGeneratedText, DEFAULT_SUMMARIZE_SETTINGS } from './enhance.js';
+import { DEFAULT_ENHANCE_SETTINGS, ENHANCE_TOGGLES, buildEnhancementPrompt, migrateEnhanceSettings, normalizeGeneratedText, DEFAULT_SUMMARIZE_SETTINGS } from './enhance.js';
 import * as MEM from './memory.js';
 import { openZip, classify, readEntry, readText, readJson, baseName, parseStChat } from './stimport.js';
 import { CHAT_STYLES, AVATAR_SHAPES, THEMES, COLOR_FIELDS, DEFAULT_APPEARANCE, paletteOf, applyAppearance, importThemeFile, exportTheme } from './theme.js';
@@ -5129,7 +5129,7 @@ async function boot() {
     ui: { ...def.ui, ...settings.ui },
     instruct: { ...def.instruct, ...(settings.instruct || {}) },
     ext: {
-      enhance: { ...def.ext.enhance, ...((settings.ext || {}).enhance || {}) },
+      enhance: migrateEnhanceSettings((settings.ext || {}).enhance),
       summarize: { ...def.ext.summarize, ...((settings.ext || {}).summarize || {}) },
       memory: { ...def.ext.memory, ...((settings.ext || {}).memory || {}) },
       ...Object.fromEntries(Object.keys(X.DEFAULT_EXT).map((k) => [k, { ...def.ext[k], ...((settings.ext || {})[k] || {}) }])),
